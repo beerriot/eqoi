@@ -2,7 +2,8 @@
 
 -export([
          encode_rgb/1,
-         encode_rgba/1
+         encode_rgba/1,
+         decode/1
         ]).
 
 %% RGB or RGBA
@@ -43,12 +44,16 @@ seen_initial(InitPixel) ->
 seen_add(Pixel, Seen) ->
     setelement(pixel_hash(Pixel)+1, Seen, Pixel).
 
+-spec seen_find(integer(), seen()) -> pixel() | undef.
+seen_find(Index, Seen) ->
+    element(Index+1, Seen).
+
 -spec seen_update(pixel(), seen()) ->
           {match, integer()} |
           {nomatch, seen()}.
 seen_update(Pixel, Seen) ->
     Hash = pixel_hash(Pixel),
-    case element(Hash+1, Seen) of
+    case seen_find(Hash, Seen) of
         Pixel ->
             {match, Hash};
         _ ->
@@ -164,3 +169,85 @@ wrap_diff(X, Y) ->
         D ->
             D
     end.
+
+wrap_sum(X, Y) ->
+    case X + Y of
+        D when D > 255 ->
+            D rem 256;
+        D when D < 0 ->
+            D + 256;
+        D ->
+            D
+    end.
+
+decode(Data) ->
+    decode_loop(Data, state_initial(pixel_initial_rgba()), []).
+
+decode_loop(<<>>, _, Acc) ->
+    iolist_to_binary(lists:reverse(Acc));
+decode_loop(Data, State, Acc) ->
+    {Pixels, NewData, NewState} = decode_next_chunk(Data, State),
+    decode_loop(NewData, NewState, [Pixels|Acc]).
+
+decode_next_chunk(<<0:2, Index:6, Rest/binary>>,
+                  State=#eqoi_state{seen=Seen}) ->
+    %% indexed
+    case seen_find(Index, Seen) of
+        Pixel when is_binary(Pixel) ->
+            {[Pixel], Rest, State#eqoi_state{previous=Pixel}};
+        _ ->
+            {error, {bad_pixel_index, Index}}
+    end;
+decode_next_chunk(<<2:3, Length:5, Rest/binary>>,
+                  State=#eqoi_state{previous=Pixel}) ->
+    %% short run
+    {lists:duplicate(Length + 1, Pixel), Rest, State};
+decode_next_chunk(<<3:3, Length:13, Rest/binary>>,
+                  State=#eqoi_state{previous=Pixel}) ->
+    %% long run
+    {lists:duplicate(Length + 1, Pixel), Rest, State};
+decode_next_chunk(<<2:2, Rd:2/signed, Bd:2/signed, Gd:2/signed,
+                    Rest/binary>>,
+                  State=#eqoi_state{previous=Pixel, seen=Seen}) ->
+    NewPixel = mod_pixel(Pixel, Rd, Bd, Gd, 0),
+    {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
+                                        seen=seen_add(NewPixel, Seen)}};
+decode_next_chunk(<<6:3, Rd:5/signed, Bd:4/signed, Gd:4/signed,
+                    Rest/binary>>,
+                  State=#eqoi_state{previous=Pixel, seen=Seen}) ->
+    NewPixel = mod_pixel(Pixel, Rd, Bd, Gd, 0),
+    {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
+                                        seen=seen_add(NewPixel, Seen)}};
+decode_next_chunk(<<14:4, Rd:5/signed, Bd:5/signed, Gd:5/signed, Ad:5/signed,
+                    Rest/binary>>,
+                  State=#eqoi_state{previous=Pixel, seen=Seen}) ->
+    NewPixel = mod_pixel(Pixel, Rd, Bd, Gd, Ad),
+    {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
+                                        seen=seen_add(NewPixel, Seen)}};
+decode_next_chunk(<<15:4, Rp:1, Bp:1, Gp:1, Ap:1, ModRest/binary>>,
+                  State=#eqoi_state{previous=Pixel, seen=Seen}) ->
+    {NewPixel, Rest} = mod_pixel(Pixel, {Rp, Bp, Gp, Ap}, ModRest),
+    {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
+                                        seen=seen_add(NewPixel, Seen)}}.
+
+-spec mod_pixel(pixel(), integer(), integer(), integer(), integer()) ->
+          pixel().
+mod_pixel(<<Ro:8, Bo:8, Go:8, Ao:8>>, Rd, Bd, Gd, Ad) ->
+    <<(wrap_sum(Rd, Ro)):8,
+      (wrap_sum(Bd, Bo)):8,
+      (wrap_sum(Gd, Go)):8,
+      (wrap_sum(Ad, Ao)):8>>.
+
+-spec mod_pixel(pixel(), {integer()}, binary()) -> {pixel(), binary()}.
+mod_pixel(<<Ro:8, Bo:8, Go:8, Ao:8>>, {Rm, Bm, Gm, Am}, Data) ->
+    {R, Rrest} = maybe_mod(Rm, Ro, Data),
+    {B, Brest} = maybe_mod(Bm, Bo, Rrest),
+    {G, Grest} = maybe_mod(Gm, Go, Brest),
+    {A, Arest} = maybe_mod(Am, Ao, Grest),
+    {<<R:8, B:8, G:8, A:8>>, Arest}.
+
+-spec maybe_mod(0|1, integer(), binary()) -> {integer(), binary()}.
+maybe_mod(0, Original, Data) ->
+    {Original, Data};
+maybe_mod(1, _, <<New:8, Rest/binary>>) ->
+    {New, Rest}.
