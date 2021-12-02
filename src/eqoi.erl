@@ -116,17 +116,17 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, seen=Seen}) ->
                                   G >= -2, G =< 1,
                                   B >= -2, B =< 1,
                                   A == 0 ->
-                    OutBin = <<2:2, R:2, G:2, B:2>>;
+                    OutBin = <<2:2, (R+2):2, (G+2):2, (B+2):2>>;
                 {R, G, B, A} when R >= -16, R =< 15,
                                   G >= -8, G =< 7,
                                   B >= -8, B =< 7,
                                   A == 0 ->
-                    OutBin = <<6:3, R:5, G:4, B:4>>;
+                    OutBin = <<6:3, (R+16):5, (G+8):4, (B+8):4>>;
                 {R, G, B, A} when R >= -16, R =< 15,
                                   G >= -16, G =< 15,
                                   B >= -16, B =< 15,
                                   A >= -16, A =< 15 ->
-                    OutBin = <<14:4, R:5, G:5, B:5, A:5>>;
+                    OutBin = <<14:4, (R+16):5, (G+16):5, (B+16):5, (A+16):5>>;
                 {R, G, B, A} ->
                     <<Pr, Pg, Pb, Pa>> = full_pixel(Pixel),
                     OutBin = [<<15:4,
@@ -280,10 +280,22 @@ read(Filename) ->
      {rgba, decode(Pixels)}].
 
 write_rgb(Pixels, Size, Filename) ->
-    write(3, Pixels, Size, Filename).
+    Chunks = encode_rgb(Pixels),
+    write(Chunks, Size, Filename, 3).
 
 write_rgba(Pixels, Size, Filename) ->
-    write(4, Pixels, Size, Filename).
+    Chunks = encode_rgba(Pixels),
+    write(Chunks, Size, Filename, 4).
 
-write(_PixelSize, _Pixels, {_Width, _Height}, _Filename) ->
-    todo.
+write(Chunks, Size, Filename, Channels) ->
+    file:write_file(Filename,
+                    [qoif_header(Size, Channels),
+                     Chunks,
+                     <<0,0,0,0>>]).
+
+qoif_header({Width, Height}, Channels) ->
+    <<"qoif",
+      Width:32/unsigned, Height:32/unsigned,
+      Channels:8/unsigned,
+      0:8/unsigned %% Color space
+      >>.
