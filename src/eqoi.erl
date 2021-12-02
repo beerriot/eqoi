@@ -3,7 +3,10 @@
 -export([
          encode_rgb/1,
          encode_rgba/1,
-         decode/1
+         decode/1,
+         read/1,
+         write_rgb/3,
+         write_rgba/3
         ]).
 
 %% RGB or RGBA
@@ -62,14 +65,10 @@ seen_update(Pixel, Seen) ->
 
 -spec pixel_hash(pixel()) -> integer().
 pixel_hash(<<R/integer, G/integer, B/integer, A/integer>>) ->
-    pixel_hash_positive_bound(R bxor G bxor B bxor A);
+    (R bxor G bxor B bxor A) rem 64;
 pixel_hash(<<R/integer, G/integer, B/integer>>) ->
-    pixel_hash_positive_bound(bnot(R bxor G bxor B)).
-
-pixel_hash_positive_bound(N) when N >= 0 ->
-    N rem 64;
-pixel_hash_positive_bound(N) ->
-    pixel_hash_positive_bound(N + 256).
+    %% bnot would flip bits 256+, producing a negative number
+    (R bxor G bxor B bxor 255) rem 64.
 
 -spec encode_rgb(binary()) -> binary().
 encode_rgb(Image) ->
@@ -136,8 +135,8 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, seen=Seen}) ->
                                 (case B of 0 -> 0; _ -> 1 end):1,
                                 (case A of 0 -> 0; _ -> 1 end):1>>,
                               case R of 0 -> Pr; _ -> <<>> end,
-                              case B of 0 -> Pb; _ -> <<>> end,
                               case G of 0 -> Pg; _ -> <<>> end,
+                              case B of 0 -> Pb; _ -> <<>> end,
                               case A of 0 -> Pa; _ -> <<>> end]
             end
     end,
@@ -155,10 +154,10 @@ maybe_add_run(Length, IoData) ->
     [encode_run(Length), IoData].
 
 
-component_diffs(<<R, B, G, A>>, <<Pr, Pb, Pg, Pa>>) ->
-    {wrap_diff(R, Pr), wrap_diff(B, Pb), wrap_diff(G, Pg), wrap_diff(A, Pa)};
-component_diffs(<<R, B, G>>, <<Pr, Pb, Pg>>) ->
-    {wrap_diff(R, Pr), wrap_diff(B, Pb), wrap_diff(G, Pg), 0}.
+component_diffs(<<R, G, B, A>>, <<Pr, Pg, Pb, Pa>>) ->
+    {wrap_diff(R, Pr), wrap_diff(G, Pg), wrap_diff(B, Pb), wrap_diff(A, Pa)};
+component_diffs(<<R, G, B>>, <<Pr, Pg, Pb>>) ->
+    {wrap_diff(R, Pr), wrap_diff(G, Pg), wrap_diff(B, Pb), 0}.
 
 wrap_diff(X, Y) ->
     case X - Y of
@@ -180,15 +179,30 @@ wrap_sum(X, Y) ->
             D
     end.
 
+-spec decode(binary()) -> binary().
 decode(Data) ->
-    decode_loop(Data, state_initial(pixel_initial_rgba()), []).
+    decode_loop(Data, state_initial(pixel_initial_rgba()), [], 0).
 
-decode_loop(<<>>, _, Acc) ->
+-spec decode_loop(binary(), #eqoi_state{}, iodata(), integer()) -> binary().
+decode_loop(<<>>, _, Acc, _) ->
     iolist_to_binary(lists:reverse(Acc));
-decode_loop(Data, State, Acc) ->
-    {Pixels, NewData, NewState} = decode_next_chunk(Data, State),
-    decode_loop(NewData, NewState, [Pixels|Acc]).
+decode_loop(<<0,0,0,0>>, _, Acc, _) ->
+    iolist_to_binary(lists:reverse(Acc));
+decode_loop(Data, State, Acc, Offset) ->
+    case decode_next_chunk(Data, State) of
+        {Pixels, NewData, NewState} ->
+            decode_loop(NewData, NewState, [Pixels|Acc],
+                        Offset+(size(Data)-size(NewData)));
+        {error, Reason} ->
+            <<Next:8, _/binary>> = Data,
+            io:format("Error processing byte ~p (~p), ~p bytes left,"
+                      " state:~n~p~nNext:~n~p~n",
+                      [Offset, Reason, size(Data), State, Next]),
+            iolist_to_binary(lists:reverse(Acc))
+    end.
 
+-spec decode_next_chunk(binary(), #eqoi_state{}) ->
+          {iodata(), binary(), #eqoi_state{}} | {error, term()}.
 decode_next_chunk(<<0:2, Index:6, Rest/binary>>,
                   State=#eqoi_state{seen=Seen}) ->
     %% indexed
@@ -206,48 +220,70 @@ decode_next_chunk(<<3:3, Length:13, Rest/binary>>,
                   State=#eqoi_state{previous=Pixel}) ->
     %% long run
     {lists:duplicate(Length + 1, Pixel), Rest, State};
-decode_next_chunk(<<2:2, Rd:2/signed, Bd:2/signed, Gd:2/signed,
+decode_next_chunk(<<2:2, Rd:2, Gd:2, Bd:2,
                     Rest/binary>>,
                   State=#eqoi_state{previous=Pixel, seen=Seen}) ->
-    NewPixel = mod_pixel(Pixel, Rd, Bd, Gd, 0),
+    %% small mod
+    NewPixel = mod_pixel(Pixel, Rd-2, Gd-2, Bd-2, 0),
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
                                         seen=seen_add(NewPixel, Seen)}};
-decode_next_chunk(<<6:3, Rd:5/signed, Bd:4/signed, Gd:4/signed,
+decode_next_chunk(<<6:3, Rd:5, Gd:4, Bd:4,
                     Rest/binary>>,
                   State=#eqoi_state{previous=Pixel, seen=Seen}) ->
-    NewPixel = mod_pixel(Pixel, Rd, Bd, Gd, 0),
+    %% medium mod
+    NewPixel = mod_pixel(Pixel, Rd-16, Gd-8, Bd-8, 0),
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
                                         seen=seen_add(NewPixel, Seen)}};
-decode_next_chunk(<<14:4, Rd:5/signed, Bd:5/signed, Gd:5/signed, Ad:5/signed,
+decode_next_chunk(<<14:4, Rd:5, Gd:5, Bd:5, Ad:5,
                     Rest/binary>>,
                   State=#eqoi_state{previous=Pixel, seen=Seen}) ->
-    NewPixel = mod_pixel(Pixel, Rd, Bd, Gd, Ad),
+    %% big mod
+    NewPixel = mod_pixel(Pixel, Rd-16, Gd-16, Bd-16, Ad-16),
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
                                         seen=seen_add(NewPixel, Seen)}};
-decode_next_chunk(<<15:4, Rp:1, Bp:1, Gp:1, Ap:1, ModRest/binary>>,
+decode_next_chunk(<<15:4, Rp:1, Gp:1, Bp:1, Ap:1, ModRest/binary>>,
                   State=#eqoi_state{previous=Pixel, seen=Seen}) ->
-    {NewPixel, Rest} = mod_pixel(Pixel, {Rp, Bp, Gp, Ap}, ModRest),
+    %% substitution
+    {NewPixel, Rest} = mod_pixel(Pixel, {Rp, Gp, Bp, Ap}, ModRest),
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
                                         seen=seen_add(NewPixel, Seen)}}.
 
 -spec mod_pixel(pixel(), integer(), integer(), integer(), integer()) ->
           pixel().
-mod_pixel(<<Ro:8, Bo:8, Go:8, Ao:8>>, Rd, Bd, Gd, Ad) ->
+mod_pixel(<<Ro:8, Go:8, Bo:8, Ao:8>>, Rd, Gd, Bd, Ad) ->
     <<(wrap_sum(Rd, Ro)):8,
-      (wrap_sum(Bd, Bo)):8,
       (wrap_sum(Gd, Go)):8,
+      (wrap_sum(Bd, Bo)):8,
       (wrap_sum(Ad, Ao)):8>>.
 
 -spec mod_pixel(pixel(), {integer()}, binary()) -> {pixel(), binary()}.
-mod_pixel(<<Ro:8, Bo:8, Go:8, Ao:8>>, {Rm, Bm, Gm, Am}, Data) ->
+mod_pixel(<<Ro:8, Go:8, Bo:8, Ao:8>>, {Rm, Gm, Bm, Am}, Data) ->
     {R, Rrest} = maybe_mod(Rm, Ro, Data),
-    {B, Brest} = maybe_mod(Bm, Bo, Rrest),
-    {G, Grest} = maybe_mod(Gm, Go, Brest),
-    {A, Arest} = maybe_mod(Am, Ao, Grest),
-    {<<R:8, B:8, G:8, A:8>>, Arest}.
+    {G, Grest} = maybe_mod(Gm, Go, Rrest),
+    {B, Brest} = maybe_mod(Bm, Bo, Grest),
+    {A, Arest} = maybe_mod(Am, Ao, Brest),
+    {<<R:8, G:8, B:8, A:8>>, Arest}.
 
 -spec maybe_mod(0|1, integer(), binary()) -> {integer(), binary()}.
 maybe_mod(0, Original, Data) ->
     {Original, Data};
 maybe_mod(1, _, <<New:8, Rest/binary>>) ->
     {New, Rest}.
+
+read(Filename) ->
+    {ok, <<"qoif",
+           Width:32/unsigned, Height:32/unsigned,
+           PixelSize:8/unsigned,
+           _ColorSpace:8/unsigned,
+           Pixels/binary>>} = file:read_file(Filename),
+    [{width, Width}, {height, Height}, {pixel_size, PixelSize},
+     {rgba, decode(Pixels)}].
+
+write_rgb(Pixels, Size, Filename) ->
+    write(3, Pixels, Size, Filename).
+
+write_rgba(Pixels, Size, Filename) ->
+    write(4, Pixels, Size, Filename).
+
+write(_PixelSize, _Pixels, {_Width, _Height}, _Filename) ->
+    todo.
