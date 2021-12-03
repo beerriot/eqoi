@@ -96,13 +96,13 @@ encode_image(PixelSize, Image, State, Acc)->
 
 -spec encode_pixel(pixel(), #eqoi_state{}) -> {iodata(), #eqoi_state{}}.
 encode_pixel(Pixel, State=#eqoi_state{previous=Pixel, run=Run}) ->
-    case Run < 8224 of
+    case Run < 8223 of
         true ->
             %% no new byte to write; just lengthen the run
             {[], State#eqoi_state{run = 1 + Run}};
         false ->
             %% max run size; write a run byte and reset the counter
-            {encode_run(Run), State#eqoi_state{run=0}}
+            {encode_run(Run+1), State#eqoi_state{run=0}}
     end;
 encode_pixel(Pixel, State=#eqoi_state{run=Run, seen=Seen}) ->
     %% not a match for previous byte
@@ -219,7 +219,7 @@ decode_next_chunk(<<2:3, Length:5, Rest/binary>>,
 decode_next_chunk(<<3:3, Length:13, Rest/binary>>,
                   State=#eqoi_state{previous=Pixel}) ->
     %% long run
-    {lists:duplicate(Length + 1, Pixel), Rest, State};
+    {lists:duplicate(Length + 33, Pixel), Rest, State};
 decode_next_chunk(<<2:2, Rd:2, Gd:2, Bd:2,
                     Rest/binary>>,
                   State=#eqoi_state{previous=Pixel, seen=Seen}) ->
