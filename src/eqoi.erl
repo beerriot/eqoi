@@ -151,7 +151,7 @@ encode_run(Length) ->
 maybe_add_run(0, IoData) ->
     IoData;
 maybe_add_run(Length, IoData) ->
-    [encode_run(Length), IoData].
+    [encode_run(Length) | IoData].
 
 
 component_diffs(<<R, G, B, A>>, <<Pr, Pg, Pb, Pa>>) ->
