@@ -80,11 +80,11 @@ encode_rgb(Image) ->
 encode_rgba(Image) ->
     encode_image(4, Image, state_initial(pixel_initial_rgba()), []).
 
-encode_image(PixelSize, Image, State, Acc)->
+encode_image(Channels, Image, State, Acc)->
     case Image of
-        <<Pixel:PixelSize/binary, Rest/binary>> ->
+        <<Pixel:Channels/binary, Rest/binary>> ->
             {NewData, NewState} = encode_pixel(Pixel, State),
-            encode_image(PixelSize, Rest, NewState,
+            encode_image(Channels, Rest, NewState,
                          case NewData of
                              [] -> Acc;
                              _ -> [NewData | Acc]
@@ -284,10 +284,10 @@ maybe_mod(1, _, <<New:8, Rest/binary>>) ->
 read(Filename) ->
     {ok, <<"qoif",
            Width:32/unsigned, Height:32/unsigned,
-           PixelSize:8/unsigned,
+           Channels:8/unsigned,
            _ColorSpace:8/unsigned,
            Pixels/binary>>} = file:read_file(Filename),
-    [{width, Width}, {height, Height}, {pixel_size, PixelSize},
+    [{width, Width}, {height, Height}, {channels, Channels},
      {rgba, decode(Pixels)}].
 
 write_rgb(Pixels, Size, Filename) ->
