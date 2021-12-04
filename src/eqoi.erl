@@ -311,60 +311,80 @@ qoif_header({Width, Height}, Channels) ->
       0:8/unsigned %% Color space
       >>.
 
+%% Verify that decode_rgb(encode_rgb(Pixels)) reproduces Pixels
+%% exactly. The two values in the successful `{ok, _, _}` return are
+%% the encoder and decoder states, respectively. They should be
+%% equivalent, but that is not part of this verification. If an error
+%% is returned, the proplist contains information about what didn't
+%% match (reason), where in the image it was (pixels_consumed), and
+%% the state of the encoder and decoder.
+-spec verify_rgb(binary()) ->
+          {ok, #eqoi_state{}, #eqoi_state{}} |
+          {error, proplists:proplist()}.
 verify_rgb(Pixels) ->
     EncodeState = state_initial(pixel_initial_rgb()),
     DecodeState = EncodeState,
     verify(3, EncodeState, DecodeState, Pixels, [], 0).
 
+%% Verify that decode_rgba(encode_rgba(Pixels)) reproduces Pixels
+%% exactly.
+-spec verify_rgba(binary()) ->
+          {ok, #eqoi_state{}, #eqoi_state{}} |
+          {error, proplists:proplist()}.
 verify_rgba(Pixels) ->
     EncodeState = state_initial(pixel_initial_rgba()),
     DecodeState = EncodeState,
     verify(4, EncodeState, DecodeState, Pixels, [], 0).
 
+%% Consume Pixels (fourth argument) one at a time, passing them to the
+%% encoder, and accumulating them in Acc (fifth argument). When the
+%% encoder returns a new chunk (or chunks), pass them to the decoder
+%% and verify that the bytes produced match the bytes
+%% accumulated. Essential verify that Pixels ==
+%% decode(encode(Pixels)), but step-by-step, stopping with hopefully
+%% helpful information when the decoding doesn't match the original.
+-spec verify(integer(),
+             #eqoi_state{}, #eqoi_state{},
+             binary(), iodata(),
+             integer()) ->
+          {ok, #eqoi_state{}, #eqoi_state{}} |
+          {error, proplists:proplist()}.
 verify(Channels, ES, DS, <<>>, Acc, Consumed) ->
     case Acc of
         [] ->
             case ES#eqoi_state.run of
-                0 -> ok;
+                0 ->
+                    {ok, ES, DS};
                 N ->
-                    io:format("ERROR! End run of length ~p with empty Acc~n"
-                              "  Input pixels: ~p~n"
-                              "  Encoder state: ~p~n"
-                              "  Decoder state: ~p~n",
-                              [N, Consumed, ES, DS])
+                    {error, [{reason,
+                              "End run non-zero, but no accumulated pixels"},
+                             {end_run_length, N},
+                             {pixels_consumed, Consumed},
+                             {encoder_state, ES},
+                             {decoder_state, DS}]}
             end;
         _ ->
             case ES#eqoi_state.run of
                 0 ->
-                    io:format("ERROR! Acc of length ~p with no run at end~n"
-                              "  Input pixels: ~p~n"
-                              "  Encoder state: ~p~n"
-                              "  Decoder state: ~p~n",
-                              [length(Acc), Consumed, ES, DS]);
+                    {error, [{reason, "Accumulated pixels remaining"},
+                             {pixels_remaining, length(Acc)},
+                             {pixels_consumed, Consumed},
+                             {encoder_state, ES},
+                             {decoder_state, DS}]};
                 N ->
                     Chunks = encode_run(N),
+                    NewES = ES#eqoi_state{run=0},
                     Expect = list_to_binary(lists:reverse(Acc)),
                     case verify_match(Channels, Chunks, Expect, DS) of
-                        {ok, _NewDS} ->
-                            ok;
+                        {ok, NewDS} ->
+                            {ok, NewES, NewDS};
                         {error, Reason, NewDS} ->
-                            io:format("ERROR! ~p~n"
-                                      "  Input pixels: ~p~n"
-                                      "  Encoder state: ~p~n"
-                                      "  Decoder state: ~p~n",
-                                      [Reason, Consumed + 1, ES, NewDS])
+                            {error, [{reason, Reason},
+                                     {pixels_consumed, Consumed},
+                                     {encoder_state, NewES},
+                                     {decoder_state, NewDS}]}
                     end
             end
-    end,
-    case ES#eqoi_state.seen == DS#eqoi_state.seen of
-        true  -> ok;
-        _ ->
-            io:format("WARNING! Ending indexes do not match~n"
-                      "  Input pixels: ~p~n"
-                      "  Encoder state: ~p~n"
-                      "  Decoder state: ~p~n",
-                      [Consumed, ES#eqoi_state.seen, DS#eqoi_state.seen]),
-            {error, nomatch_end_index}
     end;
 verify(Channels, ES, DS, Pixels, Acc, Consumed) ->
     <<Next:Channels/binary, Rest/binary>> = Pixels,
@@ -378,18 +398,20 @@ verify(Channels, ES, DS, Pixels, Acc, Consumed) ->
                 {ok, NewDS} ->
                     verify(Channels, NewES, NewDS, Rest, [], Consumed + 1);
                 {error, Reason, NewDS} ->
-                    io:format("ERROR! ~p~n"
-                              "  Input pixels: ~p~n"
-                              "  Encoder state: ~p~n"
-                              "  Decoder state: ~p~n"
-                              "  Chunks (~p): ~p~n"
-                              "  Expect (~p): ~p~n",
-                              [Reason, Consumed + 1, NewES, NewDS,
-                               size(Chunks), Chunks, size(Expect), Expect]),
-                    {error, Reason}
+                    {error, [{reason, Reason},
+                             {chunks, Chunks},
+                             {expect, Expect},
+                             {pixels_consumed, Consumed+1},
+                             {encoder_state, NewES},
+                             {decoder_state, NewDS}]}
             end
     end.
 
+%% Veryify that Chunks (second argument) decode to the bytes of Expect
+%% (third argument). The state in either return value is the updated
+%% decoder state.
+-spec verify_match(integer(), binary(), binary(), #eqoi_state{}) ->
+          {ok, #eqoi_state{}} | {error, term(), #eqoi_state{}}.
 verify_match(_, <<>>, <<>>, DS) ->
     {ok, DS};
 verify_match(_, <<>>, Expect, DS) ->
@@ -407,6 +429,11 @@ verify_match(Channels, Chunks, Expect, DS) ->
             {error, Reason, DS}
     end.
 
+%% Verify that Pixels (third argument) is an exact prefix of Expect
+%% (second argument). An `{ok, Remaining}` return means it is. if
+%% Remaining is the empty binary, Expect and Pixels were the same
+%% size. The binaries returned by `{error, {mismatch, _, _}}` might be
+%% either one pixel each, or unconsumed tails of each input.
 -spec match_pixels(integer(), binary(), binary()) ->
           {ok, binary()} | {error, {mismatch, binary(), binary()}}.
 match_pixels(_, Remaining, <<>>) ->
