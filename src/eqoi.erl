@@ -407,23 +407,24 @@ verify_match(Channels, Chunks, Expect, DS) ->
             {error, Reason, DS}
     end.
 
-match_pixels(3,
-             <<E:3/binary, Expect/binary>>,
-             <<P:3/binary, Pixels/binary>>) ->
-    case E == P of
-        true ->
-            match_pixels(3, Expect, Pixels);
-        false ->
-            {error, {mismatch, E, P}}
-    end;
-match_pixels(4,
-             <<E:4/binary, Expect/binary>>,
-             <<P:4/binary, Pixels/binary>>) ->
-    case E == P of
-        true ->
-            match_pixels(4, Expect, Pixels);
-        false ->
-            {error, {mismatch, E, P}}
-    end;
+-spec match_pixels(integer(), binary(), binary()) ->
+          {ok, binary()} | {error, {mismatch, binary(), binary()}}.
 match_pixels(_, Remaining, <<>>) ->
-    {ok, Remaining}.
+    %% Encoding can produce multiple chunks at once. Remaining bytes
+    %% here likely mean that verify_match has another chunk to decode.
+    {ok, Remaining};
+match_pixels(Channels, Expect, Pixels) ->
+    case {Expect, Pixels} of
+        {<<E:Channels/binary, RestExpect/binary>>,
+         <<P:Channels/binary, RestPixels/binary>>} ->
+            case E == P of
+                true ->
+                    match_pixels(Channels, RestExpect, RestPixels);
+                false ->
+                    {error, {mismatch, E, P}}
+            end;
+        _ ->
+            %% Pixels isn't empty, but either it has too few bytes for
+            %% a full pixel, or Expect is empty.
+            {error, {mismatch, Expect, Pixels}}
+    end.
