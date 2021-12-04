@@ -6,7 +6,9 @@
          decode/1,
          read/1,
          write_rgb/3,
-         write_rgba/3
+         write_rgba/3,
+         verify_rgb/1,
+         verify_rgba/1
         ]).
 
 %% RGB or RGBA
@@ -134,10 +136,10 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, seen=Seen}) ->
                                 (case G of 0 -> 0; _ -> 1 end):1,
                                 (case B of 0 -> 0; _ -> 1 end):1,
                                 (case A of 0 -> 0; _ -> 1 end):1>>,
-                              case R of 0 -> Pr; _ -> <<>> end,
-                              case G of 0 -> Pg; _ -> <<>> end,
-                              case B of 0 -> Pb; _ -> <<>> end,
-                              case A of 0 -> Pa; _ -> <<>> end]
+                              case R of 0 -> <<>>; _ -> Pr end,
+                              case G of 0 -> <<>>; _ -> Pg end,
+                              case B of 0 -> <<>>; _ -> Pb end,
+                              case A of 0 -> <<>>; _ -> Pa end]
             end
     end,
     {maybe_add_run(Run, OutBin),
@@ -162,9 +164,9 @@ component_diffs(<<R, G, B>>, <<Pr, Pg, Pb>>) ->
 wrap_diff(X, Y) ->
     case X - Y of
         D when D > 15 ->
-            X - (255 + Y);
+            X - (256 + Y);
         D when D < -16 ->
-            (255 + X) - Y;
+            (256 + X) - Y;
         D ->
             D
     end.
@@ -254,7 +256,11 @@ mod_pixel(<<Ro:8, Go:8, Bo:8, Ao:8>>, Rd, Gd, Bd, Ad) ->
     <<(wrap_sum(Rd, Ro)):8,
       (wrap_sum(Gd, Go)):8,
       (wrap_sum(Bd, Bo)):8,
-      (wrap_sum(Ad, Ao)):8>>.
+      (wrap_sum(Ad, Ao)):8>>;
+mod_pixel(<<Ro:8, Go:8, Bo:8>>, Rd, Gd, Bd, 0) ->
+    <<(wrap_sum(Rd, Ro)):8,
+      (wrap_sum(Gd, Go)):8,
+      (wrap_sum(Bd, Bo)):8>>.
 
 -spec mod_pixel(pixel(), {integer()}, binary()) -> {pixel(), binary()}.
 mod_pixel(<<Ro:8, Go:8, Bo:8, Ao:8>>, {Rm, Gm, Bm, Am}, Data) ->
@@ -262,7 +268,12 @@ mod_pixel(<<Ro:8, Go:8, Bo:8, Ao:8>>, {Rm, Gm, Bm, Am}, Data) ->
     {G, Grest} = maybe_mod(Gm, Go, Rrest),
     {B, Brest} = maybe_mod(Bm, Bo, Grest),
     {A, Arest} = maybe_mod(Am, Ao, Brest),
-    {<<R:8, G:8, B:8, A:8>>, Arest}.
+    {<<R:8, G:8, B:8, A:8>>, Arest};
+mod_pixel(<<Ro:8, Go:8, Bo:8>>, {Rm, Gm, Bm, 0}, Data) ->
+    {R, Rrest} = maybe_mod(Rm, Ro, Data),
+    {G, Grest} = maybe_mod(Gm, Go, Rrest),
+    {B, Brest} = maybe_mod(Bm, Bo, Grest),
+    {<<R:8, G:8, B:8>>, Brest}.
 
 -spec maybe_mod(0|1, integer(), binary()) -> {integer(), binary()}.
 maybe_mod(0, Original, Data) ->
@@ -299,3 +310,120 @@ qoif_header({Width, Height}, Channels) ->
       Channels:8/unsigned,
       0:8/unsigned %% Color space
       >>.
+
+verify_rgb(Pixels) ->
+    EncodeState = state_initial(pixel_initial_rgb()),
+    DecodeState = EncodeState,
+    verify(3, EncodeState, DecodeState, Pixels, [], 0).
+
+verify_rgba(Pixels) ->
+    EncodeState = state_initial(pixel_initial_rgba()),
+    DecodeState = EncodeState,
+    verify(4, EncodeState, DecodeState, Pixels, [], 0).
+
+verify(Channels, ES, DS, <<>>, Acc, Consumed) ->
+    case Acc of
+        [] ->
+            case ES#eqoi_state.run of
+                0 -> ok;
+                N ->
+                    io:format("ERROR! End run of length ~p with empty Acc~n"
+                              "  Input pixels: ~p~n"
+                              "  Encoder state: ~p~n"
+                              "  Decoder state: ~p~n",
+                              [N, Consumed, ES, DS])
+            end;
+        _ ->
+            case ES#eqoi_state.run of
+                0 ->
+                    io:format("ERROR! Acc of length ~p with no run at end~n"
+                              "  Input pixels: ~p~n"
+                              "  Encoder state: ~p~n"
+                              "  Decoder state: ~p~n",
+                              [length(Acc), Consumed, ES, DS]);
+                N ->
+                    Chunks = encode_run(N),
+                    Expect = list_to_binary(lists:reverse(Acc)),
+                    case verify_match(Channels, Chunks, Expect, DS) of
+                        {ok, _NewDS} ->
+                            ok;
+                        {error, Reason, NewDS} ->
+                            io:format("ERROR! ~p~n"
+                                      "  Input pixels: ~p~n"
+                                      "  Encoder state: ~p~n"
+                                      "  Decoder state: ~p~n",
+                                      [Reason, Consumed + 1, ES, NewDS])
+                    end
+            end
+    end,
+    case ES#eqoi_state.seen == DS#eqoi_state.seen of
+        true  -> ok;
+        _ ->
+            io:format("WARNING! Ending indexes do not match~n"
+                      "  Input pixels: ~p~n"
+                      "  Encoder state: ~p~n"
+                      "  Decoder state: ~p~n",
+                      [Consumed, ES#eqoi_state.seen, DS#eqoi_state.seen]),
+            {error, nomatch_end_index}
+    end;
+verify(Channels, ES, DS, Pixels, Acc, Consumed) ->
+    <<Next:Channels/binary, Rest/binary>> = Pixels,
+    case encode_pixel(Next, ES) of
+        {[], NewES} ->
+            verify(Channels, NewES, DS, Rest, [Next | Acc], Consumed + 1);
+        {EncodedList, NewES} ->
+            Chunks = list_to_binary([EncodedList]),
+            Expect = list_to_binary(lists:reverse([Next | Acc])),
+            case verify_match(Channels, Chunks, Expect, DS) of
+                {ok, NewDS} ->
+                    verify(Channels, NewES, NewDS, Rest, [], Consumed + 1);
+                {error, Reason, NewDS} ->
+                    io:format("ERROR! ~p~n"
+                              "  Input pixels: ~p~n"
+                              "  Encoder state: ~p~n"
+                              "  Decoder state: ~p~n"
+                              "  Chunks (~p): ~p~n"
+                              "  Expect (~p): ~p~n",
+                              [Reason, Consumed + 1, NewES, NewDS,
+                               size(Chunks), Chunks, size(Expect), Expect]),
+                    {error, Reason}
+            end
+    end.
+
+verify_match(_, <<>>, <<>>, DS) ->
+    {ok, DS};
+verify_match(_, <<>>, Expect, DS) ->
+    {error, {leftover_expect, Expect}, DS};
+verify_match(Channels, Chunks, Expect, DS) ->
+    case decode_next_chunk(Chunks, DS) of
+        {PixelList, Rest, NewDS} ->
+            case match_pixels(Channels, Expect, iolist_to_binary(PixelList)) of
+                {ok, Remaining} ->
+                    verify_match(Channels, Rest, Remaining, NewDS);
+                {error, Reason} ->
+                    {error, Reason, NewDS}
+            end;
+        {error, Reason} ->
+            {error, Reason, DS}
+    end.
+
+match_pixels(3,
+             <<E:3/binary, Expect/binary>>,
+             <<P:3/binary, Pixels/binary>>) ->
+    case E == P of
+        true ->
+            match_pixels(3, Expect, Pixels);
+        false ->
+            {error, {mismatch, E, P}}
+    end;
+match_pixels(4,
+             <<E:4/binary, Expect/binary>>,
+             <<P:4/binary, Pixels/binary>>) ->
+    case E == P of
+        true ->
+            match_pixels(4, Expect, Pixels);
+        false ->
+            {error, {mismatch, E, P}}
+    end;
+match_pixels(_, Remaining, <<>>) ->
+    {ok, Remaining}.
