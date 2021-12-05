@@ -1,19 +1,17 @@
 -module(eqoi).
 
 -export([
-         encode_rgb/1,
-         encode_rgba/1,
+         encode/2,
          decode/2,
          read/1,
-         write_rgb/3,
-         write_rgba/3,
          write/2,
-         verify_rgb/1,
-         verify_rgba/1
+         write/4,
+         verify/2
         ]).
 
 %% RGB or RGBA
 -type pixel() :: <<_:24>> | <<_:32>>.
+-type channels() :: 3..4.
 
 %% 64-element tuple
 -type index() :: {pixel() | undef}.
@@ -51,17 +49,17 @@ state_initial(InitPixel) ->
       }.
 
 %% Create an opaque, black pixel (the default "previous" pixel for the
-%% encoder/decoder start state).
--spec pixel_initial_rgb() -> pixel().
-pixel_initial_rgb() ->
-    <<0, 0, 0>>.
-pixel_initial_rgba() ->
+%% encoder/decoder start state), with the correct number of channels.
+-spec pixel_initial(channels()) -> pixel().
+pixel_initial(3) ->
+    <<0, 0, 0>>;
+pixel_initial(4) ->
     <<0, 0, 0, 255>>.
 
 %% Add an opaque alpha to an RGB pixel. Convenience for pattern
 %% matching and diff computation.
 -spec full_pixel(pixel()) -> <<_:32>>.
-full_pixel(P = <<_:32>>) -> P;
+full_pixel(RGBA = <<_:32>>) -> RGBA;
 full_pixel(<<RGB:24>>) -> <<RGB:24, 255>>.
 
 %%% INDEX MAINTENANCE
@@ -117,22 +115,16 @@ pixel_hash(<<R/integer, G/integer, B/integer>>) ->
 
 %%% ENCODING
 
-%% Encode the Image, treating the data 3-byte pixels (RGB, without
-%% alpha).
--spec encode_rgb(binary()) -> binary().
-encode_rgb(Image) ->
-    encode_image(3, Image, state_initial(pixel_initial_rgb()), []).
+%% Encode the Image, treating the data as pixels with Channels number
+%% of bytes. 3-byte (RGB) and 4-byte (RGB + Alpha) are supported.
+-spec encode(channels(), binary()) -> binary().
+encode(Channels, Image) ->
+    encode_image(Channels, Image, state_initial(pixel_initial(Channels)), []).
 
-%% Encode the Image, treading the data as 4-byte pixels (RGBA).
--spec encode_rgba(binary()) -> binary().
-encode_rgba(Image) ->
-    encode_image(4, Image, state_initial(pixel_initial_rgba()), []).
-
-%% Encode the Image, treating the data as `Channels`-byte pixels.
-%%
-%% This function is recursive, accumulating chunks in Acc until Image
-%% is exhausted.
--spec encode_image(integer(), binary(), #eqoi_state{}, iodata()) -> binary().
+%% Internal helper to drive the encoder by feeding it a pixel at a
+%% time. This function is recursive, accumulating chunks in Acc until
+%% Image is exhausted.
+-spec encode_image(channels(), binary(), #eqoi_state{}, iodata()) -> binary().
 encode_image(Channels, Image, State, Acc)->
     case Image of
         <<Pixel:Channels/binary, Rest/binary>> ->
@@ -238,18 +230,14 @@ encode_run(Length) ->
 
 %% Decode a chunk byte stream into a pixel byte stream, where each
 %% pixel is Channels bytes long.
--spec decode(integer(), binary()) ->
+-spec decode(channels(), binary()) ->
           {ok, binary()} | {error, proplists:proplist()}.
 decode(Channels, Chunks) ->
     %% This is a neat trick. Since all of the encodings are based on
     %% modifiying the previous pixel, if we start with a pixel having
     %% the correct number of channels, then all pixel modifications
     %% create pixels with the correct number of channels.
-    PixelInitial = case Channels of
-                       3 -> pixel_initial_rgb();
-                       4 -> pixel_initial_rgba()
-                   end,
-    decode_loop(Chunks, state_initial(PixelInitial), [], 0).
+    decode_loop(Chunks, state_initial(pixel_initial(Channels)), [], 0).
 
 %% Decode one chunk at a time, accumulating the decoded pixels in Acc.
 %%
@@ -449,24 +437,6 @@ read(Filename) ->
             {error, Props ++ Proplist}
     end.
 
-%% Encode Pixels using QOI, and write an image file at Filename. Size
-%% is a 2-tuple of {Width, Height}. Pixels should contain 3 bytes per
-%% pixel <<Red, Green, Blue>> (i.e. 3 * Width * Height).
--spec write_rgb(binary(), {integer(), integer()}, string()) ->
-          ok | {error, term()}.
-write_rgb(Pixels, Size, Filename) ->
-    Chunks = encode_rgb(Pixels),
-    write(Chunks, Size, Filename, 3).
-
-%% Encode Pixels using QOI, and write an image file at Filename. Size
-%% is a 2-tuple of {Width, Height}. Pixels should contain 4 bytes per
-%% pixel <<Red, Green, Blue, Alpha>> (i.e. 4 * Width * Height).
--spec write_rgba(binary(), {integer(), integer()}, string()) ->
-          ok | {error, term()}.
-write_rgba(Pixels, Size, Filename) ->
-    Chunks = encode_rgba(Pixels),
-    write(Chunks, Size, Filename, 4).
-
 %% Given a proplist with pixels, width, height, and channels elements,
 %% in the format specified by a successful return from read/1, write a
 %% QOI-encoded file to Filename.
@@ -476,26 +446,23 @@ write(Props, Filename) ->
     {height, Height} = proplists:lookup(height, Props),
     {channels, Channels} = proplists:lookup(channels, Props),
     {pixels, Pixels} = proplists:lookup(pixels, Props),
-    Chunks = case Channels of
-                 3 ->
-                     encode_rgb(Pixels);
-                 4 ->
-                     encode_rgba(Pixels)
-             end,
-    write(Chunks, {Width, Height}, Filename, Channels).
+    write(Channels, Pixels, {Width, Height}, Filename).
 
-%% Helper function to add the header and footer, and actually write
-%% the file.
--spec write(binary(), {integer(), integer()}, string(), integer()) ->
+%% Encode Pixels using QOI, and write an image file at Filename. Size
+%% is a 2-tuple of {Width, Height}. Pixels should contain Channels
+%% bytes per pixel <<Red, Green, Blue [, Alpha]>> (i.e. Channels *
+%% Width * Height).
+-spec write(channels(), binary(), {integer(), integer()}, string()) ->
           ok | {error, term()}.
-write(Chunks, Size, Filename, Channels) ->
+write(Channels, Pixels, Size, Filename) ->
+    Chunks = encode(Channels, Pixels),
     file:write_file(Filename,
                     [qoif_header(Size, Channels),
                      Chunks,
                      ?FILE_TAIL]).
 
 %% Create a QOI-format file header.
--spec qoif_header({integer(), integer()}, integer()) -> binary().
+-spec qoif_header({integer(), integer()}, channels()) -> binary().
 qoif_header({Width, Height}, Channels) ->
     <<"qoif",
       Width:32/unsigned, Height:32/unsigned,
@@ -505,30 +472,20 @@ qoif_header({Width, Height}, Channels) ->
 
 %% TESTING
 
-%% Verify that decode_rgb(encode_rgb(Pixels)) reproduces Pixels
-%% exactly. The two values in the successful `{ok, _, _}` return are
-%% the encoder and decoder states, respectively. They should be
-%% equivalent, but that is not part of this verification. If an error
-%% is returned, the proplist contains information about what didn't
-%% match (reason), where in the image it was (pixels_consumed), and
-%% the state of the encoder and decoder.
--spec verify_rgb(binary()) ->
+%% Verify that decode(Channels, encode(Channels, Pixels)) reproduces
+%% Pixels exactly. The two values in the successful `{ok, _, _}`
+%% return are the encoder and decoder states, respectively. They
+%% should be equivalent, but that is not part of this verification. If
+%% an error is returned, the proplist contains information about what
+%% didn't match (reason), where in the image it was (pixels_consumed),
+%% and the state of the encoder and decoder.
+-spec verify(channels(), binary()) ->
           {ok, #eqoi_state{}, #eqoi_state{}} |
           {error, proplists:proplist()}.
-verify_rgb(Pixels) ->
-    EncodeState = state_initial(pixel_initial_rgb()),
+verify(Channels, Pixels) ->
+    EncodeState = state_initial(pixel_initial(Channels)),
     DecodeState = EncodeState,
-    verify(3, EncodeState, DecodeState, Pixels, [], 0).
-
-%% Verify that decode_rgba(encode_rgba(Pixels)) reproduces Pixels
-%% exactly.
--spec verify_rgba(binary()) ->
-          {ok, #eqoi_state{}, #eqoi_state{}} |
-          {error, proplists:proplist()}.
-verify_rgba(Pixels) ->
-    EncodeState = state_initial(pixel_initial_rgba()),
-    DecodeState = EncodeState,
-    verify(4, EncodeState, DecodeState, Pixels, [], 0).
+    verify(Channels, EncodeState, DecodeState, Pixels, [], 0).
 
 %% Consume Pixels (fourth argument) one at a time, passing them to the
 %% encoder, and accumulating them in Acc (fifth argument). When the
@@ -537,7 +494,7 @@ verify_rgba(Pixels) ->
 %% accumulated. Essential verify that Pixels ==
 %% decode(encode(Pixels)), but step-by-step, stopping with hopefully
 %% helpful information when the decoding doesn't match the original.
--spec verify(integer(),
+-spec verify(channels(),
              #eqoi_state{}, #eqoi_state{},
              binary(), iodata(),
              integer()) ->
@@ -604,7 +561,7 @@ verify(Channels, ES, DS, Pixels, Acc, Consumed) ->
 %% Veryify that Chunks (second argument) decode to the bytes of Expect
 %% (third argument). The state in either return value is the updated
 %% decoder state.
--spec verify_match(integer(), binary(), binary(), #eqoi_state{}) ->
+-spec verify_match(channels(), binary(), binary(), #eqoi_state{}) ->
           {ok, #eqoi_state{}} | {error, term(), #eqoi_state{}}.
 verify_match(_, <<>>, <<>>, DS) ->
     {ok, DS};
@@ -628,7 +585,7 @@ verify_match(Channels, Chunks, Expect, DS) ->
 %% Remaining is the empty binary, Expect and Pixels were the same
 %% size. The binaries returned by `{error, {mismatch, _, _}}` might be
 %% either one pixel each, or unconsumed tails of each input.
--spec match_pixels(integer(), binary(), binary()) ->
+-spec match_pixels(channels(), binary(), binary()) ->
           {ok, binary()} | {error, {mismatch, binary(), binary()}}.
 match_pixels(_, Remaining, <<>>) ->
     %% Encoding can produce multiple chunks at once. Remaining bytes
