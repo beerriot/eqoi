@@ -36,3 +36,21 @@ eqoi:write(3, % RGB only, no alpha
            {wxImage:getWidth(WI), wxImage:getHeight(WI)},
            "my-cool-image.qoi").
 ```
+
+Read an image in QOI format:
+
+```erlang
+{ok, Props} = eqoi:read("my-even-cooler-image.qoi").
+```
+
+Write the image as a PNG using wxErlang (only works if the image has 3
+channels, without alpha):
+
+```erlang
+wx:new(). %% only necessary if you haven't already done this
+WI2 = wxImage:new().
+wxImage:setData(WI2,
+                proplists:get_value(pixels, Props),
+                proplists:get_value(width, Props),
+wxImage:saveFile(WI2, "my-even-cooler-image.png").
+```
