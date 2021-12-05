@@ -1,3 +1,26 @@
+%% Simple "QOI - Quite Okay Image" format.
+%%
+%% Based on https://github.com/phoboslab/qoi.
+%%
+%% Terminology:
+%%
+%%  * Pixel: 3 or 4 8-bit bytes, stored as a `binary()`, either on its
+%%           own or as part of a larger binary.
+%%
+%%  * Channels: Number of bytes per pixel. Three (Red, Green, Blue),
+%%              and four (Red, Green, Blue, Alpha) are supported.
+%%
+%%  * Chunk: One QOI code. These may be from one to five bytes in
+%%           length.
+%%
+%% The encode/2 function converts from a binary() of Pixels to a
+%% binary() of Chunks. The decode/2 function converts from a binary()
+%% of Chunks to a binary() of Pixels.
+%%
+%% The read/1 and write/2,4 functions will load or store files
+%% containing QOI chunks, prefixed with an informational header,
+%% on-disk.
+
 -module(eqoi).
 
 -export([
