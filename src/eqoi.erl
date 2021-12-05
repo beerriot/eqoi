@@ -157,6 +157,9 @@ encode_image(Channels, Image, State, Acc)->
 -spec encode_pixel(pixel(), #eqoi_state{}) -> {iodata(), #eqoi_state{}}.
 encode_pixel(Pixel, State=#eqoi_state{previous=Pixel, run=Run}) ->
     %% previous pixel matches this pixel
+    %% 8223 = 2 ^ 13 (for the number of bits in a long run)
+    %%        - 1    (for the pixel we're about to add)
+    %%        + 32   (for the shift down that short runs cover)
     case Run < 8223 of
         true ->
             %% no new chunk to write; just lengthen the run
@@ -180,18 +183,21 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
                                   B >= -2, B =< 1,
                                   A == 0 ->
                     %% small modification
+                    %% +2 = diffs are shifted up to be encoded unsigned
                     OutBin = <<2:2, (R+2):2, (G+2):2, (B+2):2>>;
                 {R, G, B, A} when R >= -16, R =< 15,
                                   G >= -8, G =< 7,
                                   B >= -8, B =< 7,
                                   A == 0 ->
                     %% medium modification
+                    %% +16,+8 = diffs are shifted up to be encoded unsigned
                     OutBin = <<6:3, (R+16):5, (G+8):4, (B+8):4>>;
                 {R, G, B, A} when R >= -16, R =< 15,
                                   G >= -16, G =< 15,
                                   B >= -16, B =< 15,
                                   A >= -16, A =< 15 ->
                     %% large modification
+                    %% +16 = diffs are shifted up to be encoded unsigned
                     OutBin = <<14:4, (R+16):5, (G+16):5, (B+16):5, (A+16):5>>;
                 {R, G, B, A} ->
                     %% component substitution
@@ -222,8 +228,11 @@ maybe_add_run(Length, IoData) ->
 %% Encode a run-length chunk.
 -spec encode_run(integer) -> iodata().
 encode_run(Length) when Length =< 32 ->
+    %% -1 = no need to encode a run of length 0, so encoded 0 = length 1
     <<2:3, (Length-1):5>>;
 encode_run(Length) ->
+    %% 33 = -32 (covered by short runs)
+    %%      -1 (see clause above)
     <<3:3, (Length-33):13>>.
 
 %%% DECODING
@@ -286,15 +295,18 @@ decode_next_chunk(<<0:2, Hash:6, Rest/binary>>,
 decode_next_chunk(<<2:3, Length:5, Rest/binary>>,
                   State=#eqoi_state{previous=Pixel}) ->
     %% short run
+    %% (see encode_run/1 for "+1" explanation)
     {lists:duplicate(Length + 1, Pixel), Rest, State};
 decode_next_chunk(<<3:3, Length:13, Rest/binary>>,
                   State=#eqoi_state{previous=Pixel}) ->
     %% long run
+    %% (see encode_run/1 for "+33" explanation)
     {lists:duplicate(Length + 33, Pixel), Rest, State};
 decode_next_chunk(<<2:2, Rd:2, Gd:2, Bd:2,
                     Rest/binary>>,
                   State=#eqoi_state{previous=Pixel, index=Index}) ->
     %% small modification
+    %% -2 = diffs are shifted up to be encoded unsigned
     NewPixel = mod_pixel(Pixel, Rd-2, Gd-2, Bd-2, 0),
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
                                         index=index_add(NewPixel, Index)}};
@@ -302,6 +314,7 @@ decode_next_chunk(<<6:3, Rd:5, Gd:4, Bd:4,
                     Rest/binary>>,
                   State=#eqoi_state{previous=Pixel, index=Index}) ->
     %% medium modification
+    %% -16,-8 = diffs are shifted up to be encoded unsigned
     NewPixel = mod_pixel(Pixel, Rd-16, Gd-8, Bd-8, 0),
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
                                         index=index_add(NewPixel, Index)}};
@@ -309,6 +322,7 @@ decode_next_chunk(<<14:4, Rd:5, Gd:5, Bd:5, Ad:5,
                     Rest/binary>>,
                   State=#eqoi_state{previous=Pixel, index=Index}) ->
     %% large modification
+    %% -16 = diffs are shifted up to be encoded unsigned
     NewPixel = mod_pixel(Pixel, Rd-16, Gd-16, Bd-16, Ad-16),
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
                                         index=index_add(NewPixel, Index)}};
