@@ -1,5 +1,5 @@
 {application, eqoi,
- [{description, "An OTP application"},
+ [{description, "QOI Image Format"},
   {vsn, "0.1.0"},
   {registered, []},
   {mod, {eqoi_app, []}},
