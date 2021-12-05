@@ -18,7 +18,7 @@
 -define(INDEX_SIZE, 64).
 
 %% The hash of a pixel
--type hash() :: 0..?INDEX_SIZE.
+-type hash() :: 0..(?INDEX_SIZE-1).
 
 %% Encoder/decoder state
 -record(eqoi_state,
