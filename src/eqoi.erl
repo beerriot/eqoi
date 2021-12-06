@@ -131,10 +131,9 @@ index_update(Pixel, Index) ->
 %% Compute the hash of a pixel.
 -spec pixel_hash(pixel()) -> hash().
 pixel_hash(<<R/integer, G/integer, B/integer, A/integer>>) ->
-    (R bxor G bxor B bxor A) rem ?INDEX_SIZE;
+    (R bxor G bxor B bxor A) rem (?INDEX_SIZE-1);
 pixel_hash(<<R/integer, G/integer, B/integer>>) ->
-    %% bnot would flip bits 256+, producing a negative number
-    (R bxor G bxor B bxor 255) rem ?INDEX_SIZE.
+    (R bxor G bxor B bxor 255) rem (?INDEX_SIZE-1).
 
 %%% ENCODING
 
