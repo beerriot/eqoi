@@ -20,6 +20,18 @@
 %% The read/1 and write/2,4 functions will load or store files
 %% containing QOI chunks, prefixed with an informational header,
 %% on-disk.
+%%
+%% Chunk Encoding:
+%%
+%%   0 0 Reference:6
+%%   0 1 0 Run:5
+%%   1 0 R:2 G:2 B:2
+%%
+%%   0 1 1 Run:5  Run:8
+%%   1 1 0 R:5  G:4 B:4
+%%
+%%   1 1 1 0 R:5 G:5 B:5 A:5
+%%   1 1 1 1 RGBA ? ? ?
 
 -module(eqoi).
 
