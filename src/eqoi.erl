@@ -230,7 +230,14 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
                 {R, G, B, A} when R >= -16, R =< 15,
                                   G >= -16, G =< 15,
                                   B >= -16, B =< 15,
-                                  A >= -16, A =< 15 ->
+                                  A >= -16, A =< 15,
+                                  %% if any of the following are true,
+                                  %% it's more efficient to use a
+                                  %% one-byte substitution
+                                  not ((R bor G bor B == 0)
+                                       orelse (R bor B bor A == 0)
+                                       orelse (R bor G bor A == 0)
+                                       orelse (G bor B bor A == 0)) ->
                     %% large modification
                     %% +16 = diffs are shifted up to be encoded unsigned
                     OutBin = <<14:4, (R+16):5, (G+16):5, (B+16):5, (A+16):5>>;
