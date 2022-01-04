@@ -2,7 +2,8 @@
 
 -export([
          compare/2,
-         compare_full/2
+         compare_full/2,
+         collect_stats/1
         ]).
 
 %% Compare two QOI encodings. Stop at first differing chunk, and
@@ -79,3 +80,37 @@ consume_chunk(<<14:4, _:4, _/binary>>=Stream) ->
 consume_chunk(<<15:4, R:1, G:1, B:1, A:1, _/binary>>=Stream) ->
     <<Chunk:(1+R+G+B+A)/binary, Rest/binary>>=Stream,
     {ok, Chunk, Rest}.
+
+collect_stats(Stream) ->
+    EmptyStats = [
+                  {reference, 0, []},
+                  {run_short, 0, []},
+                  {run_long, 0, []},
+                  {mod_small, 0, []},
+                  {mod_medium, 0, []},
+                  {mod_large, 0, []},
+                  {substitute, 0, []}
+                 ],
+    collect_stats(Stream, EmptyStats).
+
+collect_stats(<<0:2, _:6, Rest/binary>>, Stats) ->
+    collect_stats(Rest, increment_stat(reference, Stats));
+collect_stats(<<2:3, _:5, Rest/binary>>, Stats) ->
+    collect_stats(Rest, increment_stat(run_short, Stats));
+collect_stats(<<3:3, _:13, Rest/binary>>, Stats) ->
+    collect_stats(Rest, increment_stat(run_long, Stats));
+collect_stats(<<2:2, _:6, Rest/binary>>, Stats) ->
+    collect_stats(Rest, increment_stat(mod_small, Stats));
+collect_stats(<<6:3, _:13, Rest/binary>>, Stats) ->
+    collect_stats(Rest, increment_stat(mod_medium, Stats));
+collect_stats(<<14:4, _:20, Rest/binary>>, Stats) ->
+    collect_stats(Rest, increment_stat(mod_large, Stats));
+collect_stats(<<15:4, R:1, G:1, B:1, A:1, Next/binary>>, Stats) ->
+    <<_:(R+G+B+A)/binary, Rest/binary>> = Next,
+    collect_stats(Rest, increment_stat(substitute, Stats));
+collect_stats(<<>>, Stats) ->
+    Stats.
+
+increment_stat(Type, Stats) ->
+    {value, {Type, Count, Props}, Rest} = lists:keytake(Type, 1, Stats),
+    [{Type, Count+1, Props}|Rest].
