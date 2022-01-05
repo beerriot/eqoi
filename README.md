@@ -4,7 +4,7 @@ eqoi: A simple Erlang implentation of the "Quite Okay Image" format
 This is a simple implementation of the
 [QOI](https://github.com/phoboslab/qoi) image compression format. It
 has been lightly tested to ensure compatibility with [phoboslab/qoi @
-e9069e1](https://github.com/phoboslab/qoi/tree/e9069e11a43d779b418679c7a50b2ec14f652085).
+a27f8ed](https://github.com/phoboslab/qoi/commit/a27f8ed4593ffad272b70030bf1ef3010d0803e1).
 
 There is some scaffolding for making this an Erlang Application here
 (`src/{eqoi.app.src, eqoi_app.erl, eqoi_sup.erl`). Ignore it for
