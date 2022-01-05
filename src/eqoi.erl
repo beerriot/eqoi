@@ -47,12 +47,12 @@
 -type pixel() :: <<_:24>> | <<_:32>>.
 -type channels() :: 3..4.
 
-%% 64-element tuple
--type index() :: {pixel() | undef}.
--define(INDEX_SIZE, 64).
-
 %% The hash of a pixel
+-define(INDEX_SIZE, 64).
 -type hash() :: 0..(?INDEX_SIZE-1).
+
+%% map from hash to pixel value
+-type index() :: #{hash() := pixel()}.
 
 %% Encoder/decoder state
 -record(eqoi_state,
@@ -79,7 +79,7 @@ state_initial(InitPixel) ->
     #eqoi_state{
        previous = InitPixel,
        run = 0,
-       index = index_initial(InitPixel)
+       index = index_add(InitPixel, #{})
       }.
 
 %% Create an opaque, black pixel (the default "previous" pixel for the
@@ -92,17 +92,6 @@ pixel_initial(4) ->
 
 %%% INDEX MAINTENANCE
 
-%% Create an index that has only mapped the given initial pixel.
--spec index_initial(pixel()) -> index().
-index_initial(InitPixel) ->
-    index_add(InitPixel,
-              list_to_tuple(lists:duplicate(?INDEX_SIZE, undef))).
-
-%% Lookup a pixel in the index, by hash value.
--spec index_find(integer(), index()) -> pixel() | undef.
-index_find(Hash, Index) ->
-    element(Hash+1, Index).
-
 %% Map a pixel in the index. This will replace any pixel mapped at the
 %% same hash.
 %%
@@ -110,28 +99,7 @@ index_find(Hash, Index) ->
 %% pixel was already mapped (i.e. in decoding).
 -spec index_add(pixel(), index()) -> index().
 index_add(Pixel, Index) ->
-    setelement(pixel_hash(Pixel)+1, Index, Pixel).
-
-%% Check if a pixel is already mapped in the index, and map it if it
-%% isn't. This will replace any pixel mapped at the same hash.
-%%
-%% If the pixel is already mapped, `{match, Hash}` is returned (to cue
-%% the encoder to produce a chunk referencing it). If the pixel is not
-%% already mapped, `{nomatch, UpdatedIndex}` is returned with the
-%% mapping made (to cue the encoder to produce a chunk describing the
-%% pixel another way, while saving the value for potential later
-%% reference).
--spec index_update(pixel(), index()) ->
-          {match, integer()} |
-          {nomatch, index()}.
-index_update(Pixel, Index) ->
-    Hash = pixel_hash(Pixel),
-    case index_find(Hash, Index) of
-        Pixel ->
-            {match, Hash};
-        _ ->
-            {nomatch, setelement(Hash+1, Index, Pixel)}
-    end.
+    Index#{pixel_hash(Pixel) => Pixel}.
 
 %% Compute the hash of a pixel.
 -spec pixel_hash(pixel()) -> hash().
@@ -194,13 +162,15 @@ encode_pixel(Pixel, State=#eqoi_state{previous=Pixel, run=Run}) ->
     end;
 encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
     %% not a match for previous pixel
-    case index_update(Pixel, Index) of
-        {match, Hash} ->
+    Hash = pixel_hash(Pixel),
+    case Index of
+        #{Hash := Pixel} ->
             %% reference a pixel value already in the index
             OutBin = <<0:2, Hash:6>>,
             NewIndex = Index;
-        {nomatch, NewIndex} ->
+        _ ->
             %% describe the new pixel value
+            NewIndex = Index#{Hash => Pixel},
             case component_diffs(Pixel, State#eqoi_state.previous) of
                 {R, G, B, A} when R >= -2, R =< 1,
                                   G >= -2, G =< 1,
@@ -300,8 +270,8 @@ decode_loop(Chunks, State, Acc, Offset) ->
 decode_next_chunk(<<0:2, Hash:6, Rest/binary>>,
                   State=#eqoi_state{index=Index}) ->
     %% indexed pixel
-    case index_find(Hash, Index) of
-        Pixel when is_binary(Pixel) ->
+    case Index of
+        #{Hash := Pixel} ->
             {Pixel, Rest, State#eqoi_state{previous=Pixel}};
         _ ->
             {error, {bad_pixel_index, Index}}
