@@ -63,51 +63,43 @@ compare_full(Stream1, Stream2, Offset1, Offset2, Diffs) ->
 
 %% Trying not to completely reimplement eqoi:decode_next_chunk
 %% here. We just want the chunk, without any interpretation.
-consume_chunk(<<N:2, _:6, _/binary>>=Stream) when N == 0; N == 2 ->
+consume_chunk(<<N:2, _:6, _/binary>>=Stream) when N >= 0, N =< 2 ->
     <<Chunk, Rest/binary>> = Stream,
     {ok, Chunk, Rest};
-consume_chunk(<<N:3, _:5, _/binary>>=Stream) when N == 2; N == 3; N == 6 ->
+consume_chunk(<<N:8, _/binary>>=Stream) when N == 254; N == 255 ->
     case N of
-        2 ->
-            <<Chunk, Rest/binary>> = Stream;
-        _ ->
-            <<Chunk:2/binary, Rest/binary>> = Stream
+        254 ->
+            <<Chunk:4/binary, Rest/binary>> = Stream;
+        255 ->
+            <<Chunk:5/binary, Rest/binary>> = Stream
     end,
     {ok, Chunk, Rest};
-consume_chunk(<<14:4, _:4, _/binary>>=Stream) ->
-    <<Chunk:3/binary, Rest/binary>> = Stream,
-    {ok, Chunk, Rest};
-consume_chunk(<<15:4, R:1, G:1, B:1, A:1, _/binary>>=Stream) ->
-    <<Chunk:(1+R+G+B+A)/binary, Rest/binary>>=Stream,
+consume_chunk(<<Chunk, Rest/binary>>) ->
     {ok, Chunk, Rest}.
 
 collect_stats(Stream) ->
     EmptyStats = [
                   {reference, 0, []},
-                  {run_short, 0, []},
-                  {run_long, 0, []},
+                  {run, 0, []},
                   {mod_small, 0, []},
                   {mod_medium, 0, []},
-                  {mod_large, 0, []},
-                  {substitute, 0, []}
+                  {substitute_no_alpha, 0, []},
+                  {substitute_alpha, 0, []}
                  ],
     collect_stats(Stream, EmptyStats).
 
 collect_stats(<<0:2, _:6, Rest/binary>>, Stats) ->
     collect_stats(Rest, increment_stat(reference, Stats));
-collect_stats(<<2:3, _:5, Rest/binary>>, Stats) ->
-    collect_stats(Rest, increment_stat(run_short, Stats));
-collect_stats(<<3:3, _:13, Rest/binary>>, Stats) ->
-    collect_stats(Rest, increment_stat(run_long, Stats));
-collect_stats(<<2:2, _:6, Rest/binary>>, Stats) ->
+collect_stats(<<1:2, _:6, Rest/binary>>, Stats) ->
     collect_stats(Rest, increment_stat(mod_small, Stats));
-collect_stats(<<6:3, _:13, Rest/binary>>, Stats) ->
+collect_stats(<<2:2, _:14, Rest/binary>>, Stats) ->
     collect_stats(Rest, increment_stat(mod_medium, Stats));
-collect_stats(<<14:4, _:20, Rest/binary>>, Stats) ->
-    collect_stats(Rest, increment_stat(mod_large, Stats));
-collect_stats(<<15:4, R:1, G:1, B:1, A:1, Next/binary>>, Stats) ->
-    <<_:(R+G+B+A)/binary, Rest/binary>> = Next,
-    collect_stats(Rest, increment_stat(substitute, Stats));
+collect_stats(<<254:8, _:3/binary, Rest/binary>>, Stats) ->
+    collect_stats(Rest, increment_stat(substitute_no_alpha, Stats));
+collect_stats(<<255:8, _:13, Rest/binary>>, Stats) ->
+    collect_stats(Rest, increment_stat(substitute_alpha, Stats));
+collect_stats(<<3:2, _:6, Rest/binary>>, Stats) ->
+    collect_stats(Rest, increment_stat(run, Stats));
 collect_stats(<<>>, Stats) ->
     Stats.
 

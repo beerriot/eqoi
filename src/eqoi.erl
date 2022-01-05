@@ -24,14 +24,13 @@
 %% Chunk Encoding:
 %%
 %%   0 0 Reference:6
-%%   0 1 0 Run:5
-%%   1 0 R:2 G:2 B:2
+%%   0 1 R:2 G:2 B:2
+%%   1 0 G:6         R:4 B:4
 %%
-%%   0 1 1 Run:5  Run:8
-%%   1 1 0 R:5  G:4 B:4
+%%   1 1 1 1 1 1 1 0 R:8 G:8 B:8
+%%   1 1 1 1 1 1 1 1 R:8 G:8 B:8 A:8
 %%
-%%   1 1 1 0 R:5 G:5 B:5 A:5
-%%   1 1 1 1 RGBA ? ? ?
+%%   1 1 Run:6
 
 -module(eqoi).
 
@@ -70,7 +69,7 @@
         }).
 
 %% QOI format final file bytes
--define(FILE_TAIL, <<0,0,0,0>>).
+-define(FILE_TAIL, <<0,0,0,0,0,0,0,1>>).
 
 %%% SETUP
 
@@ -90,12 +89,6 @@ pixel_initial(3) ->
     <<0, 0, 0>>;
 pixel_initial(4) ->
     <<0, 0, 0, 255>>.
-
-%% Add an opaque alpha to an RGB pixel. Convenience for pattern
-%% matching and diff computation.
--spec full_pixel(pixel()) -> <<_:32>>.
-full_pixel(RGBA = <<_:32>>) -> RGBA;
-full_pixel(<<RGB:24>>) -> <<RGB:24, 255>>.
 
 %%% INDEX MAINTENANCE
 
@@ -143,10 +136,9 @@ index_update(Pixel, Index) ->
 %% Compute the hash of a pixel.
 -spec pixel_hash(pixel()) -> hash().
 pixel_hash(<<R/integer, G/integer, B/integer, A/integer>>) ->
-    (R bxor G bxor B bxor A) rem ?INDEX_SIZE;
+    ((R * 3) + (G * 5) + (B * 7) + (A * 11)) rem ?INDEX_SIZE;
 pixel_hash(<<R/integer, G/integer, B/integer>>) ->
-    %% bnot would flip bits 256+, producing a negative number
-    (R bxor G bxor B bxor 255) rem ?INDEX_SIZE.
+    ((R * 3) + (G * 5) + (B * 7) + (255 * 11)) rem ?INDEX_SIZE.
 
 %%% ENCODING
 
@@ -192,10 +184,7 @@ encode_image(Channels, Image, State, Acc)->
 -spec encode_pixel(pixel(), #eqoi_state{}) -> {iodata(), #eqoi_state{}}.
 encode_pixel(Pixel, State=#eqoi_state{previous=Pixel, run=Run}) ->
     %% previous pixel matches this pixel
-    %% 8223 = 2 ^ 13 (for the number of bits in a long run)
-    %%        - 1    (for the pixel we're about to add)
-    %%        + 32   (for the shift down that short runs cover)
-    case Run < 8223 of
+    case Run < 61 of
         true ->
             %% no new chunk to write; just lengthen the run
             {[], State#eqoi_state{run = 1 + Run}};
@@ -219,40 +208,27 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
                                   A == 0 ->
                     %% small modification
                     %% +2 = diffs are shifted up to be encoded unsigned
-                    OutBin = <<2:2, (R+2):2, (G+2):2, (B+2):2>>;
-                {R, G, B, A} when R >= -16, R =< 15,
-                                  G >= -8, G =< 7,
-                                  B >= -8, B =< 7,
+                    OutBin = <<1:2, (R+2):2, (G+2):2, (B+2):2>>;
+                {R, G, B, A} when G >= -32, G =< 31,
+                                  (R-G) >= -8, (R-G) =< 7,
+                                  (B-G) >= -8, (B-G) =< 7,
                                   A == 0 ->
                     %% medium modification
-                    %% +16,+8 = diffs are shifted up to be encoded unsigned
-                    OutBin = <<6:3, (R+16):5, (G+8):4, (B+8):4>>;
-                {R, G, B, A} when R >= -16, R =< 15,
-                                  G >= -16, G =< 15,
-                                  B >= -16, B =< 15,
-                                  A >= -16, A =< 15,
-                                  %% if any of the following are true,
-                                  %% it's more efficient to use a
-                                  %% one-byte substitution
-                                  not ((R bor G bor B == 0)
-                                       orelse (R bor B bor A == 0)
-                                       orelse (R bor G bor A == 0)
-                                       orelse (G bor B bor A == 0)) ->
-                    %% large modification
-                    %% +16 = diffs are shifted up to be encoded unsigned
-                    OutBin = <<14:4, (R+16):5, (G+16):5, (B+16):5, (A+16):5>>;
-                {R, G, B, A} ->
-                    %% component substitution
-                    <<Pr, Pg, Pb, Pa>> = full_pixel(Pixel),
-                    OutBin = [<<15:4,
-                                (case R of 0 -> 0; _ -> 1 end):1,
-                                (case G of 0 -> 0; _ -> 1 end):1,
-                                (case B of 0 -> 0; _ -> 1 end):1,
-                                (case A of 0 -> 0; _ -> 1 end):1>>,
-                              case R of 0 -> <<>>; _ -> Pr end,
-                              case G of 0 -> <<>>; _ -> Pg end,
-                              case B of 0 -> <<>>; _ -> Pb end,
-                              case A of 0 -> <<>>; _ -> Pa end]
+                    %% +32,+8 = diffs are shifted up to be encoded unsigned
+                    OutBin = <<2:2, (G+32):6, (R-G+8):4, (B-G+8):4>>;
+                {_, _, _, 0} ->
+                    %% component substitution, no alpha change
+                    <<RGB:3/binary>> = Pixel,
+                    OutBin = <<254:8, RGB/binary>>;
+                _ when size(Pixel) == 4 ->
+                    %% component substitution, alpha change
+
+                    %% 'when' clause is not necessary - diff won't
+                    %% show an alpha change if the pixel is only 3
+                    %% bytes wide, but the guard is kept here to
+                    %% ensure that
+
+                    OutBin = <<255:8, Pixel/binary>>
             end
     end,
     {maybe_add_run(Run, OutBin),
@@ -269,13 +245,9 @@ maybe_add_run(Length, IoData) ->
 
 %% Encode a run-length chunk.
 -spec encode_run(integer) -> iodata().
-encode_run(Length) when Length =< 32 ->
+encode_run(Length) when Length =< 62 ->
     %% -1 = no need to encode a run of length 0, so encoded 0 = length 1
-    <<2:3, (Length-1):5>>;
-encode_run(Length) ->
-    %% 33 = -32 (covered by short runs)
-    %%      -1 (see clause above)
-    <<3:3, (Length-33):13>>.
+    <<3:2, (Length-1):6>>.
 
 %%% DECODING
 
@@ -334,17 +306,7 @@ decode_next_chunk(<<0:2, Hash:6, Rest/binary>>,
         _ ->
             {error, {bad_pixel_index, Index}}
     end;
-decode_next_chunk(<<2:3, Length:5, Rest/binary>>,
-                  State=#eqoi_state{previous=Pixel}) ->
-    %% short run
-    %% (see encode_run/1 for "+1" explanation)
-    {lists:duplicate(Length + 1, Pixel), Rest, State};
-decode_next_chunk(<<3:3, Length:13, Rest/binary>>,
-                  State=#eqoi_state{previous=Pixel}) ->
-    %% long run
-    %% (see encode_run/1 for "+33" explanation)
-    {lists:duplicate(Length + 33, Pixel), Rest, State};
-decode_next_chunk(<<2:2, Rd:2, Gd:2, Bd:2,
+decode_next_chunk(<<1:2, Rd:2, Gd:2, Bd:2,
                     Rest/binary>>,
                   State=#eqoi_state{previous=Pixel, index=Index}) ->
     %% small modification
@@ -352,28 +314,33 @@ decode_next_chunk(<<2:2, Rd:2, Gd:2, Bd:2,
     NewPixel = mod_pixel(Pixel, Rd-2, Gd-2, Bd-2, 0),
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
                                         index=index_add(NewPixel, Index)}};
-decode_next_chunk(<<6:3, Rd:5, Gd:4, Bd:4,
+decode_next_chunk(<<2:2, Gd:6, Rd:4, Bd:4,
                     Rest/binary>>,
                   State=#eqoi_state{previous=Pixel, index=Index}) ->
     %% medium modification
-    %% -16,-8 = diffs are shifted up to be encoded unsigned
-    NewPixel = mod_pixel(Pixel, Rd-16, Gd-8, Bd-8, 0),
+    %% -32 = green shift to unsigned encoding
+    %% -40 = red and blue shift to unsigned encoding, plus green shift
+    NewPixel = mod_pixel(Pixel, Gd+Rd-40, Gd-32, Gd+Bd-40, 0),
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
                                         index=index_add(NewPixel, Index)}};
-decode_next_chunk(<<14:4, Rd:5, Gd:5, Bd:5, Ad:5,
-                    Rest/binary>>,
+decode_next_chunk(<<254:8, RGB:3/binary, Rest/binary>>,
                   State=#eqoi_state{previous=Pixel, index=Index}) ->
-    %% large modification
-    %% -16 = diffs are shifted up to be encoded unsigned
-    NewPixel = mod_pixel(Pixel, Rd-16, Gd-16, Bd-16, Ad-16),
+    case Pixel of
+        <<_,_,_>> -> NewPixel = RGB;
+        <<_,_,_,A>> -> NewPixel = <<RGB:3/binary,A>>
+    end,
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
                                         index=index_add(NewPixel, Index)}};
-decode_next_chunk(<<15:4, Rp:1, Gp:1, Bp:1, Ap:1, ModRest/binary>>,
-                  State=#eqoi_state{previous=Pixel, index=Index}) ->
-    %% component substitution
-    {NewPixel, Rest} = sub_pixel(Pixel, {Rp, Gp, Bp, Ap}, ModRest),
+decode_next_chunk(<<255:8, NewPixel:4/binary, Rest/binary>>,
+                  State=#eqoi_state{index=Index}) ->
     {[NewPixel], Rest, State#eqoi_state{previous=NewPixel,
-                                        index=index_add(NewPixel, Index)}}.
+                                        index=index_add(NewPixel, Index)}};
+decode_next_chunk(<<3:2, Length:6, Rest/binary>>,
+                  State=#eqoi_state{previous=Pixel}) ->
+    %% short run
+    %% (see encode_run/1 for "+1" explanation)
+    {lists:duplicate(Length + 1, Pixel), Rest, State}.
+
 
 %% PIXEL VALUE MANIPULATION
 
@@ -389,16 +356,12 @@ component_diffs(<<R, G, B>>, <<Pr, Pg, Pb>>) ->
 %% wrap-around math described by the QOI spec. That is the difference
 %% between 0 and 255 is either 1 or -1, depending on which way you're
 %% wrapping.
-%%
-%% The encoder isn't going to use a diff unless it's in the range
-%% -16..15, so returning -128 instead of 128 (or 56 instead of -200,
-%% etc.) doesn't matter.
 -spec wrap_diff(integer(), integer()) -> integer().
 wrap_diff(X, Y) ->
     case X - Y of
-        D when D > 15 ->
+        D when D > 127 ->
             X - (256 + Y);
-        D when D < -16 ->
+        D when D < -127 ->
             (256 + X) - Y;
         D ->
             D
@@ -437,40 +400,6 @@ mod_pixel(<<Ro:8, Go:8, Bo:8>>, Rd, Gd, Bd, 0) ->
     <<(wrap_sum(Rd, Ro)):8,
       (wrap_sum(Gd, Go)):8,
       (wrap_sum(Bd, Bo)):8>>.
-
-%% Substitute pixel components. Each element in the second-argument
-%% tuple maps to the same-position component of the first-argument
-%% pixel. For each 1 in the tuple, read the next byte from Data, and
-%% use that byte for that component of the pixel. Return the modified
-%% pixel value, and the unconsumed data.
-%%
-%% e.g. sub_pixel(<<1, 2, 3, 4>>, {0, 1, 1, 0}, [5, 6, 7, 8])
-%%         -> {<<1, 5, 6, 4>>, [7, 8]}.
--spec sub_pixel(pixel(), {integer()}, binary()) -> {pixel(), binary()}.
-sub_pixel(<<Ro:8, Go:8, Bo:8, Ao:8>>, {Rm, Gm, Bm, Am}, Data) ->
-    {R, Rrest} = maybe_sub(Rm, Ro, Data),
-    {G, Grest} = maybe_sub(Gm, Go, Rrest),
-    {B, Brest} = maybe_sub(Bm, Bo, Grest),
-    {A, Arest} = maybe_sub(Am, Ao, Brest),
-    {<<R:8, G:8, B:8, A:8>>, Arest};
-sub_pixel(<<Ro:8, Go:8, Bo:8>>, {Rm, Gm, Bm, 0}, Data) ->
-    %% Alpha will never be subsituted in 3-Channel images. And,
-    %% importantly, the decoding process depends on this function
-    %% producing pixels with the same number of channels as previous
-    %% pixels.
-    {R, Rrest} = maybe_sub(Rm, Ro, Data),
-    {G, Grest} = maybe_sub(Gm, Go, Rrest),
-    {B, Brest} = maybe_sub(Bm, Bo, Grest),
-    {<<R:8, G:8, B:8>>, Brest}.
-
-%% Helper function for sub_pixel/3. If the first argument is 0, return
-%% Original and Data unchanged. If 1, return the first byte of Data
-%% instead of Original, and the Data remaining after that byte.
--spec maybe_sub(0|1, integer(), binary()) -> {integer(), binary()}.
-maybe_sub(0, Original, Data) ->
-    {Original, Data};
-maybe_sub(1, _, <<New:8, Rest/binary>>) ->
-    {New, Rest}.
 
 %% READING AND WRITING FILES
 
