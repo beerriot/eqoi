@@ -309,7 +309,7 @@ decode_next_chunk(<<3:2, Length:6, Rest/binary>>,
                   State=#eqoi_state{previous=Pixel}) ->
     %% short run
     %% (see encode_run/1 for "+1" explanation)
-    {lists:duplicate(Length + 1, Pixel), Rest, State}.
+    {binary:copy(Pixel, Length+1), Rest, State}.
 
 
 %% PIXEL VALUE MANIPULATION
