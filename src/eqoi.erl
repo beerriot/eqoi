@@ -342,12 +342,10 @@ wrap_diff(X, Y) ->
 -spec wrap_sum(-16..15, 0..255) -> 0..255.
 wrap_sum(X, Y) ->
     case X + Y of
-        D when D > 255 ->
-            D rem 256;
         D when D < 0 ->
             D + 256;
         D ->
-            D
+            D rem 256
     end.
 
 %% Apply differences to pixel components.
