@@ -172,24 +172,21 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
             %% describe the new pixel value
             NewIndex = Index#{Hash => Pixel},
             case component_diffs(Pixel, State#eqoi_state.previous) of
-                {R, G, B, A} when R >= -2, R =< 1,
+                {R, G, B, 0} when R >= -2, R =< 1,
                                   G >= -2, G =< 1,
-                                  B >= -2, B =< 1,
-                                  A == 0 ->
+                                  B >= -2, B =< 1 ->
                     %% small modification
                     %% +2 = diffs are shifted up to be encoded unsigned
                     OutBin = <<1:2, (R+2):2, (G+2):2, (B+2):2>>;
-                {R, G, B, A} when G >= -32, G =< 31,
+                {R, G, B, 0} when G >= -32, G =< 31,
                                   (R-G) >= -8, (R-G) =< 7,
-                                  (B-G) >= -8, (B-G) =< 7,
-                                  A == 0 ->
+                                  (B-G) >= -8, (B-G) =< 7 ->
                     %% medium modification
                     %% +32,+8 = diffs are shifted up to be encoded unsigned
                     OutBin = <<2:2, (G+32):6, (R-G+8):4, (B-G+8):4>>;
                 {_, _, _, 0} ->
                     %% component substitution, no alpha change
-                    <<RGB:3/binary>> = Pixel,
-                    OutBin = <<254:8, RGB/binary>>;
+                    OutBin = <<254:8, Pixel:3/binary>>;
                 _ when size(Pixel) == 4 ->
                     %% component substitution, alpha change
 
