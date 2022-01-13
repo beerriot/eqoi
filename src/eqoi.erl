@@ -326,9 +326,9 @@ component_diffs(<<R, G, B>>, <<Pr, Pg, Pb>>) ->
 wrap_diff(X, Y) ->
     case X - Y of
         D when D > 127 ->
-            X - (256 + Y);
+            D - 256;
         D when D < -127 ->
-            (256 + X) - Y;
+            D + 256;
         D ->
             D
     end.
