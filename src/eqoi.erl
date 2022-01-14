@@ -119,18 +119,18 @@ encode(Channels, Image) ->
                  state_initial(pixel_initial(Channels)), <<>>).
 
 %% Internal helper to drive the encoder by feeding it a pixel at a
-%% time. This function is recursive, accumulating chunks in Acc until
-%% Image is exhausted.
+%% time.
+%%
+%% The encode_pixel function appends chunks onto Acc as it needs. This
+%% saves time over, for example, having encode_image return new chunk
+%% bytes, and then appending them here, because we don't have to
+%% create a new binary just for the return value.
 -spec encode_image(channels(), binary(), #eqoi_state{}, binary()) -> binary().
 encode_image(Channels, Image, State, Acc)->
     case Image of
         <<Pixel:Channels/binary, Rest/binary>> ->
-            {NewData, NewState} = encode_pixel(Pixel, State),
-            encode_image(Channels, Rest, NewState,
-                         case NewData of
-                             none -> Acc;
-                             _ -> <<Acc/binary, NewData/binary>>
-                         end);
+            {NewAcc, NewState} = encode_pixel(Pixel, State, Acc),
+            encode_image(Channels, Rest, NewState, NewAcc);
         <<>> ->
             maybe_add_run(State#eqoi_state.run, Acc)
     end.
@@ -149,30 +149,26 @@ encode_image(Channels, Image, State, Acc)->
 %%
 %% One chunk will be produced in the cases not covered above (run
 %% length exceeded, or run length zero).
-%%
-%% All chunks are returned as a single binary. If no chunks were
-%% produced, the atom 'none' is returned instead. While this could
-%% have been the empty binary, it's more efficient to use the atom
-%% than to create an empty binary.
--spec encode_pixel(pixel(), #eqoi_state{}) ->
-          {binary() | none, #eqoi_state{}}.
-encode_pixel(Pixel, State=#eqoi_state{previous=Pixel, run=Run}) ->
+-spec encode_pixel(pixel(), #eqoi_state{}, binary()) ->
+          {binary(), #eqoi_state{}}.
+encode_pixel(Pixel, State=#eqoi_state{previous=Pixel, run=Run}, Acc) ->
     %% previous pixel matches this pixel
     case Run < 61 of
         true ->
             %% no new chunk to write; just lengthen the run
-            {none, State#eqoi_state{run = 1 + Run}};
+            {Acc, State#eqoi_state{run = 1 + Run}};
         false ->
             %% max run size; write a run chunk and reset the counter
-            {encode_run(Run+1), State#eqoi_state{run=0}}
+            {<<Acc/binary, (encode_run(Run+1))/binary>>,
+             State#eqoi_state{run=0}}
     end;
-encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
+encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}, Acc) ->
     %% not a match for previous pixel
     Hash = pixel_hash(Pixel),
     case Index of
         #{Hash := Pixel} ->
             %% reference a pixel value already in the index
-            OutBin = <<0:2, Hash:6>>,
+            NewAcc = <<(maybe_add_run(Run, Acc))/binary, 0:2, Hash:6>>,
             NewIndex = Index;
         _ ->
             %% describe the new pixel value
@@ -183,16 +179,19 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
                                   B >= -2, B =< 1 ->
                     %% small modification
                     %% +2 = diffs are shifted up to be encoded unsigned
-                    OutBin = <<1:2, (R+2):2, (G+2):2, (B+2):2>>;
+                    NewAcc = <<(maybe_add_run(Run, Acc))/binary,
+                               1:2, (R+2):2, (G+2):2, (B+2):2>>;
                 {R, G, B, 0} when G >= -32, G =< 31,
                                   (R-G) >= -8, (R-G) =< 7,
                                   (B-G) >= -8, (B-G) =< 7 ->
                     %% medium modification
                     %% +32,+8 = diffs are shifted up to be encoded unsigned
-                    OutBin = <<2:2, (G+32):6, (R-G+8):4, (B-G+8):4>>;
+                    NewAcc = <<(maybe_add_run(Run, Acc))/binary,
+                               2:2, (G+32):6, (R-G+8):4, (B-G+8):4>>;
                 {_, _, _, 0} ->
                     %% component substitution, no alpha change
-                    OutBin = <<254, Pixel:3/binary>>;
+                    NewAcc = <<(maybe_add_run(Run, Acc))/binary,
+                               254, Pixel:3/binary>>;
                 _ when size(Pixel) == 4 ->
                     %% component substitution, alpha change
 
@@ -201,19 +200,19 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
                     %% bytes wide, but the guard is kept here to
                     %% ensure that
 
-                    OutBin = <<255, Pixel/binary>>
+                    NewAcc = <<(maybe_add_run(Run, Acc))/binary,
+                               255, Pixel/binary>>
             end
     end,
-    {maybe_add_run(Run, OutBin),
-     State#eqoi_state{previous=Pixel, run=0, index=NewIndex}}.
+    {NewAcc, State#eqoi_state{previous=Pixel, run=0, index=NewIndex}}.
 
 %% If the state's run length counter is non-zero, add a run-length
-%% chunk before any other chunks produced.
+%% chunk at the end of the accumulated binary.
 -spec maybe_add_run(integer(), binary()) -> binary().
-maybe_add_run(0, Chunk) ->
-    Chunk;
-maybe_add_run(Length, Chunk) ->
-    <<(encode_run(Length))/binary, Chunk/binary>>.
+maybe_add_run(0, Acc) ->
+    Acc;
+maybe_add_run(Length, Acc) ->
+    <<Acc/binary, (encode_run(Length))/binary>>.
 
 %% Encode a run-length chunk.
 -spec encode_run(integer) -> binary().
@@ -485,8 +484,8 @@ verify(Channels, ES, DS, <<>>, Acc, Consumed) ->
     end;
 verify(Channels, ES, DS, Pixels, Acc, Consumed) ->
     <<Next:Channels/binary, Rest/binary>> = Pixels,
-    case encode_pixel(Next, ES) of
-        {none, NewES} ->
+    case encode_pixel(Next, ES, <<>>) of
+        {<<>>, NewES} ->
             verify(Channels, NewES, DS, Rest, <<Acc/binary, Next/binary>>,
                    Consumed + 1);
         {Chunks, NewES} ->
