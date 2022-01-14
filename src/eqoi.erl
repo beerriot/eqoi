@@ -227,33 +227,18 @@ decode(Channels, Chunks) ->
     %% modifiying the previous pixel, if we start with a pixel having
     %% the correct number of channels, then all pixel modifications
     %% create pixels with the correct number of channels.
-    decode_loop(Chunks, state_initial(pixel_initial(Channels)), [], 0).
+    case decode_loop(Chunks, state_initial(pixel_initial(Channels)), [], 0) of
+        {ok, Pixels, _} ->
+            {ok, Pixels};
+        Error={error,_} ->
+            Error
+    end.
 
 %% Decode one chunk at a time, accumulating the decoded pixels in Acc.
 %%
 %% The final argument, Offset, is only used for debugging. It keeps
 %% track of how many bytes have been processed from the Chunks binary,
 %% so that information can be included in any potential error return.
--spec decode_loop(binary(), #eqoi_state{}, iodata(), integer()) ->
-          {ok, binary()} | {error, proplists:proplist()}.
-decode_loop(<<>>, _, Acc, _) ->
-    %% accept a chunk stream with no file tail, for easier testing
-    {ok, iolist_to_binary(lists:reverse(Acc))};
-decode_loop(?FILE_TAIL, _, Acc, _) ->
-    {ok, iolist_to_binary(lists:reverse(Acc))};
-decode_loop(Chunks, State, Acc, Offset) ->
-    case decode_next_chunk(Chunks, State) of
-        {Pixels, Consumed, RestChunks, NewState} ->
-            decode_loop(RestChunks, NewState, [Pixels|Acc], Offset+Consumed);
-        {error, Reason} ->
-            {error, [{reason, Reason},
-                     {decoder_state, State},
-                     {chunk_bytes_processed, Offset},
-                     {chunk_bytes_remaining, Chunks},
-                     {decoded_pixels, iolist_to_binary(lists:reverse(Acc))}]}
-    end.
-
-%% Decode the next chunk of the Chunks byte stream.
 %%
 %% This is a different style than the encoder, because while we knew
 %% how many bytes were in a pixel without looking at its value, we
@@ -261,52 +246,73 @@ decode_loop(Chunks, State, Acc, Offset) ->
 %% bits. This could be rewritten to take one byte at a time, and track
 %% decoding state until a full chunk is read, but the pattern matching
 %% works out well the way it's written here.
--spec decode_next_chunk(binary(), #eqoi_state{}) ->
-          {iodata(), binary(), #eqoi_state{}} | {error, term()}.
-decode_next_chunk(<<0:2, Hash:6, Rest/binary>>,
-                  State=#eqoi_state{index=Index}) ->
+-spec decode_loop(binary(), #eqoi_state{}, iodata(), integer()) ->
+          {ok, binary(), #eqoi_state{}} | {error, proplists:proplist()}.
+decode_loop(<<>>, State, Acc, _) ->
+    %% accept a chunk stream with no file tail, for easier testing
+    {ok, iolist_to_binary(lists:reverse(Acc)), State};
+decode_loop(?FILE_TAIL, State, Acc, _) ->
+    {ok, iolist_to_binary(lists:reverse(Acc)), State};
+decode_loop(<<0:2, Hash:6, Rest/binary>>,
+            State=#eqoi_state{index=Index},
+            Acc, Offset) ->
     %% indexed pixel
     case Index of
         #{Hash := Pixel} ->
-            {Pixel, 1, Rest, State#eqoi_state{previous=Pixel}};
+            decode_loop(Rest, State#eqoi_state{previous=Pixel},
+                        [Pixel|Acc], Offset+1);
         _ ->
-            {error, {bad_pixel_index, Index}}
+            {error, [{reason, {bad_pixel_index, Index}},
+                     {decoder_state, State},
+                     {chunk_bytes_processed, Offset},
+                     {chunk_bytes_remaining, Rest},
+                     {decoded_pixels, iolist_to_binary(lists:reverse(Acc))}]}
     end;
-decode_next_chunk(<<1:2, Rd:2, Gd:2, Bd:2,
-                    Rest/binary>>,
-                  State=#eqoi_state{previous=Pixel, index=Index}) ->
+decode_loop(<<1:2, Rd:2, Gd:2, Bd:2,Rest/binary>>,
+            State=#eqoi_state{previous=Pixel, index=Index},
+            Acc, Offset) ->
     %% small modification
     %% -2 = diffs are shifted up to be encoded unsigned
     NewPixel = mod_pixel(Pixel, Rd-2, Gd-2, Bd-2, 0),
-    {[NewPixel], 1, Rest, State#eqoi_state{previous=NewPixel,
-                                           index=index_add(NewPixel, Index)}};
-decode_next_chunk(<<2:2, Gd:6, Rd:4, Bd:4,
-                    Rest/binary>>,
-                  State=#eqoi_state{previous=Pixel, index=Index}) ->
+    decode_loop(Rest,
+                State#eqoi_state{previous=NewPixel,
+                                 index=index_add(NewPixel, Index)},
+                [NewPixel, Acc], Offset+1);
+decode_loop(<<2:2, Gd:6, Rd:4, Bd:4, Rest/binary>>,
+            State=#eqoi_state{previous=Pixel, index=Index},
+            Acc, Offset) ->
     %% medium modification
     %% -32 = green shift to unsigned encoding
     %% -40 = red and blue shift to unsigned encoding, plus green shift
     NewPixel = mod_pixel(Pixel, Gd+Rd-40, Gd-32, Gd+Bd-40, 0),
-    {[NewPixel], 2, Rest, State#eqoi_state{previous=NewPixel,
-                                           index=index_add(NewPixel, Index)}};
-decode_next_chunk(<<254:8, RGB:3/binary, Rest/binary>>,
-                  State=#eqoi_state{previous=Pixel, index=Index}) ->
+    decode_loop(Rest,
+                State#eqoi_state{previous=NewPixel,
+                                 index=index_add(NewPixel, Index)},
+                [NewPixel|Acc], Offset+2);
+decode_loop(<<254:8, RGB:3/binary, Rest/binary>>,
+            State=#eqoi_state{previous=Pixel, index=Index},
+            Acc, Offset) ->
     case Pixel of
         <<_,_,_>> -> NewPixel = RGB;
         <<_,_,_,A>> -> NewPixel = <<RGB:3/binary,A>>
     end,
-    {[NewPixel], 4, Rest, State#eqoi_state{previous=NewPixel,
-                                           index=index_add(NewPixel, Index)}};
-decode_next_chunk(<<255:8, NewPixel:4/binary, Rest/binary>>,
-                  State=#eqoi_state{index=Index}) ->
-    {[NewPixel], 5, Rest, State#eqoi_state{previous=NewPixel,
-                                           index=index_add(NewPixel, Index)}};
-decode_next_chunk(<<3:2, Length:6, Rest/binary>>,
-                  State=#eqoi_state{previous=Pixel}) ->
+    decode_loop(Rest,
+                State#eqoi_state{previous=NewPixel,
+                                 index=index_add(NewPixel, Index)},
+                [NewPixel|Acc], Offset+4);
+decode_loop(<<255:8, NewPixel:4/binary, Rest/binary>>,
+            State=#eqoi_state{index=Index},
+            Acc, Offset) ->
+    decode_loop(Rest,
+                State#eqoi_state{previous=NewPixel,
+                                 index=index_add(NewPixel, Index)},
+                [NewPixel|Acc], Offset+5);
+decode_loop(<<3:2, Length:6, Rest/binary>>,
+            State=#eqoi_state{previous=Pixel},
+            Acc, Offset) ->
     %% short run
     %% (see encode_run/1 for "+1" explanation)
-    {binary:copy(Pixel, Length+1), 1, Rest, State}.
-
+    decode_loop(Rest, State, [binary:copy(Pixel, Length+1)|Acc], Offset+1).
 
 %% PIXEL VALUE MANIPULATION
 
@@ -512,16 +518,14 @@ verify(Channels, ES, DS, Pixels, Acc, Consumed) ->
 %% decoder state.
 -spec verify_match(channels(), binary(), binary(), #eqoi_state{}) ->
           {ok, #eqoi_state{}} | {error, term(), #eqoi_state{}}.
-verify_match(_, <<>>, <<>>, DS) ->
-    {ok, DS};
-verify_match(_, <<>>, Expect, DS) ->
-    {error, {leftover_expect, Expect}, DS};
 verify_match(Channels, Chunks, Expect, DS) ->
-    case decode_next_chunk(Chunks, DS) of
-        {PixelList, _Consumed, Rest, NewDS} ->
+    case decode_loop(Chunks, DS, [], 0) of
+        {ok, PixelList, NewDS} ->
             case match_pixels(Channels, Expect, iolist_to_binary(PixelList)) of
+                {ok, <<>>} ->
+                    {ok, NewDS};
                 {ok, Remaining} ->
-                    verify_match(Channels, Rest, Remaining, NewDS);
+                    {error, {leftover_expect, Remaining}, NewDS};
                 {error, Reason} ->
                     {error, Reason, NewDS}
             end;
