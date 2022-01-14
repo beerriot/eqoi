@@ -94,9 +94,6 @@ pixel_initial(4) ->
 
 %% Map a pixel in the index. This will replace any pixel mapped at the
 %% same hash.
-%%
-%% Use this instead of index_update if you don't care whether the
-%% pixel was already mapped (i.e. in decoding).
 -spec index_add(pixel(), index()) -> index().
 index_add(Pixel, Index) ->
     Index#{pixel_hash(Pixel) => Pixel}.
@@ -148,7 +145,13 @@ encode_image(Channels, Image, State, Acc)->
 %%
 %% One chunk will be produced in the cases not covered above (run
 %% length exceeded, or run length zero).
--spec encode_pixel(pixel(), #eqoi_state{}) -> {binary(), #eqoi_state{}}.
+%%
+%% All chunks are returned as a single binary. If no chunks were
+%% produced, the atom 'none' is returned instead. While this could
+%% have been the empty binary, it's more efficient to use the atom
+%% than to create an empty binary.
+-spec encode_pixel(pixel(), #eqoi_state{}) ->
+          {binary() | none, #eqoi_state{}}.
 encode_pixel(Pixel, State=#eqoi_state{previous=Pixel, run=Run}) ->
     %% previous pixel matches this pixel
     case Run < 61 of
@@ -185,7 +188,7 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
                     OutBin = <<2:2, (G+32):6, (R-G+8):4, (B-G+8):4>>;
                 {_, _, _, 0} ->
                     %% component substitution, no alpha change
-                    OutBin = <<254:8, Pixel:3/binary>>;
+                    OutBin = <<254, Pixel:3/binary>>;
                 _ when size(Pixel) == 4 ->
                     %% component substitution, alpha change
 
@@ -194,12 +197,11 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
                     %% bytes wide, but the guard is kept here to
                     %% ensure that
 
-                    OutBin = <<255:8, Pixel/binary>>
+                    OutBin = <<255, Pixel/binary>>
             end
     end,
     {maybe_add_run(Run, OutBin),
      State#eqoi_state{previous=Pixel, run=0, index=NewIndex}}.
-
 
 %% If the state's run length counter is non-zero, add a run-length
 %% chunk before any other chunks produced.
@@ -289,7 +291,7 @@ decode_loop(<<2:2, Gd:6, Rd:4, Bd:4, Rest/binary>>,
                 State#eqoi_state{previous=NewPixel,
                                  index=index_add(NewPixel, Index)},
                 <<Acc/binary, NewPixel/binary>>, Offset+2);
-decode_loop(<<254:8, RGB:3/binary, Rest/binary>>,
+decode_loop(<<254, RGB:3/binary, Rest/binary>>,
             State=#eqoi_state{previous=Pixel, index=Index},
             Acc, Offset) ->
     case Pixel of
@@ -300,7 +302,7 @@ decode_loop(<<254:8, RGB:3/binary, Rest/binary>>,
                 State#eqoi_state{previous=NewPixel,
                                  index=index_add(NewPixel, Index)},
                 <<Acc/binary, NewPixel/binary>>, Offset+4);
-decode_loop(<<255:8, NewPixel:4/binary, Rest/binary>>,
+decode_loop(<<255, NewPixel:4/binary, Rest/binary>>,
             State=#eqoi_state{index=Index},
             Acc, Offset) ->
     decode_loop(Rest,
@@ -367,8 +369,8 @@ mod_pixel(<<Ro, Go, Bo>>, Rd, Gd, Bd, 0) ->
 read(Filename) ->
     {ok, <<"qoif",
            Width:32/unsigned, Height:32/unsigned,
-           Channels:8/unsigned,
-           _ColorSpace:8/unsigned, %% ignored right now
+           Channels,
+           _ColorSpace, %% ignored right now
            Chunks/binary>>} = file:read_file(Filename),
     Props = [{width, Width}, {height, Height}, {channels, Channels}],
     case decode(Channels, Chunks) of
@@ -407,8 +409,8 @@ write(Channels, Pixels, Size, Filename) ->
 qoif_header({Width, Height}, Channels) ->
     <<"qoif",
       Width:32/unsigned, Height:32/unsigned,
-      Channels:8/unsigned,
-      0:8/unsigned %% Color space - unused right now
+      Channels,
+      0 %% Color space - unused right now
       >>.
 
 %% TESTING
