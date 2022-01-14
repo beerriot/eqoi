@@ -339,37 +339,21 @@ wrap_diff(X, Y) ->
             D
     end.
 
-%% Compute the sum of two pixel components, wrapping the value around
-%% 0<->255. (That is, 255+1=0, 1-2=255, etc.)
-%%
-%% Yes, the way the ranges in the spec are written are arbitrary
-%% (either X or Y could be the diff, and the other the pixel), but it
-%% describes the function bounds correctly.
--spec wrap_sum(-16..15, 0..255) -> 0..255.
-wrap_sum(X, Y) ->
-    case X + Y of
-        D when D < 0 ->
-            D + 256;
-        D ->
-            D rem 256
-    end.
-
 %% Apply differences to pixel components.
+%%
+%% We don't have to do any checking around <0 or >255, because putting
+%% the integer in the binary is going to limit it to the lowest eight
+%% bits, which does what we would have done with arithmetic.
 -spec mod_pixel(pixel(), integer(), integer(), integer(), integer()) ->
           pixel().
-mod_pixel(<<Ro:8, Go:8, Bo:8, Ao:8>>, Rd, Gd, Bd, Ad) ->
-    <<(wrap_sum(Rd, Ro)):8,
-      (wrap_sum(Gd, Go)):8,
-      (wrap_sum(Bd, Bo)):8,
-      (wrap_sum(Ad, Ao)):8>>;
-mod_pixel(<<Ro:8, Go:8, Bo:8>>, Rd, Gd, Bd, 0) ->
+mod_pixel(<<Ro, Go, Bo, Ao>>, Rd, Gd, Bd, Ad) ->
+    <<(Rd+Ro), (Gd+Go), (Bd+Bo), (Ad+Ao)>>;
+mod_pixel(<<Ro, Go, Bo>>, Rd, Gd, Bd, 0) ->
     %% Alpha diff will always be zero for 3-Channel images. And,
     %% importantly, the decoding process depends on this function
     %% producing pixels with the same number of channels as previous
     %% pixels.
-    <<(wrap_sum(Rd, Ro)):8,
-      (wrap_sum(Gd, Go)):8,
-      (wrap_sum(Bd, Bo)):8>>.
+    <<(Rd+Ro), (Gd+Go), (Bd+Bo)>>.
 
 %% READING AND WRITING FILES
 
