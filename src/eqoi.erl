@@ -43,6 +43,10 @@
          verify/2
         ]).
 
+-compile({inline, [{index_add, 2},
+                   {wrap_diff, 2},
+                   {encode_run, 1}]}).
+
 %% RGB or RGBA
 -type pixel() :: <<_:24>> | <<_:32>>.
 -type channels() :: 3..4.
@@ -324,24 +328,24 @@ decode_loop(<<3:2, Length:6, Rest/binary>>,
 %% wrap-around math described by the QOI spec. That is the difference
 %% between 0 and 255 is either 1 or -1, depending on which way you're
 %% wrapping.
--define(WRAP_DIFF(X, Y, D),
-        case X - Y of
-            D when D > 127 ->
-                D - 256;
-            D when D < -127 ->
-                D + 256;
-            D ->
-                D
-        end).
+-spec wrap_diff(integer(), integer()) -> integer().
+wrap_diff(X, Y) ->
+    case X - Y of
+        D when D > 127 ->
+            D - 256;
+        D when D < -127 ->
+            D + 256;
+        D ->
+            D
+    end.
 
 %% Compute the component-wise difference of two pixels.
 -spec component_diffs(pixel(), pixel()) ->
           {integer(), integer(), integer(), integer()}.
 component_diffs(<<R, G, B, A>>, <<Pr, Pg, Pb, Pa>>) ->
-    {?WRAP_DIFF(R, Pr, RA), ?WRAP_DIFF(G, Pg, GA), ?WRAP_DIFF(B, Pb, BA),
-     ?WRAP_DIFF(A, Pa, AA)};
+    {wrap_diff(R, Pr), wrap_diff(G, Pg), wrap_diff(B, Pb), wrap_diff(A, Pa)};
 component_diffs(<<R, G, B>>, <<Pr, Pg, Pb>>) ->
-    {?WRAP_DIFF(R, Pr, RA), ?WRAP_DIFF(G, Pg, GA), ?WRAP_DIFF(B, Pb, BA), 0}.
+    {wrap_diff(R, Pr), wrap_diff(G, Pg), wrap_diff(B, Pb), 0}.
 
 %% Apply differences to pixel components.
 %%
