@@ -114,25 +114,24 @@ pixel_hash(<<R/integer, G/integer, B/integer>>) ->
 %% of bytes. 3-byte (RGB) and 4-byte (RGB + Alpha) are supported.
 -spec encode(channels(), binary()) -> binary().
 encode(Channels, Image) ->
-    encode_image(Channels, Image, state_initial(pixel_initial(Channels)), []).
+    encode_image(Channels, Image,
+                 state_initial(pixel_initial(Channels)), <<>>).
 
 %% Internal helper to drive the encoder by feeding it a pixel at a
 %% time. This function is recursive, accumulating chunks in Acc until
 %% Image is exhausted.
--spec encode_image(channels(), binary(), #eqoi_state{}, iodata()) -> binary().
+-spec encode_image(channels(), binary(), #eqoi_state{}, binary()) -> binary().
 encode_image(Channels, Image, State, Acc)->
     case Image of
         <<Pixel:Channels/binary, Rest/binary>> ->
             {NewData, NewState} = encode_pixel(Pixel, State),
             encode_image(Channels, Rest, NewState,
                          case NewData of
-                             [] -> Acc;
-                             _ -> [NewData | Acc]
+                             none -> Acc;
+                             _ -> <<Acc/binary, NewData/binary>>
                          end);
         <<>> ->
-            iolist_to_binary(
-              lists:reverse(
-                maybe_add_run(State#eqoi_state.run, Acc)))
+            maybe_add_run(State#eqoi_state.run, Acc)
     end.
 
 %% Apply a pixel to the encoder state. Zero, one, or two chunks may be
@@ -149,13 +148,13 @@ encode_image(Channels, Image, State, Acc)->
 %%
 %% One chunk will be produced in the cases not covered above (run
 %% length exceeded, or run length zero).
--spec encode_pixel(pixel(), #eqoi_state{}) -> {iodata(), #eqoi_state{}}.
+-spec encode_pixel(pixel(), #eqoi_state{}) -> {binary(), #eqoi_state{}}.
 encode_pixel(Pixel, State=#eqoi_state{previous=Pixel, run=Run}) ->
     %% previous pixel matches this pixel
     case Run < 61 of
         true ->
             %% no new chunk to write; just lengthen the run
-            {[], State#eqoi_state{run = 1 + Run}};
+            {none, State#eqoi_state{run = 1 + Run}};
         false ->
             %% max run size; write a run chunk and reset the counter
             {encode_run(Run+1), State#eqoi_state{run=0}}
@@ -204,14 +203,14 @@ encode_pixel(Pixel, State=#eqoi_state{run=Run, index=Index}) ->
 
 %% If the state's run length counter is non-zero, add a run-length
 %% chunk before any other chunks produced.
--spec maybe_add_run(integer(), iodata()) -> iodata().
-maybe_add_run(0, IoData) ->
-    IoData;
-maybe_add_run(Length, IoData) ->
-    [encode_run(Length) | IoData].
+-spec maybe_add_run(integer(), binary()) -> binary().
+maybe_add_run(0, Chunk) ->
+    Chunk;
+maybe_add_run(Length, Chunk) ->
+    <<(encode_run(Length))/binary, Chunk/binary>>.
 
 %% Encode a run-length chunk.
--spec encode_run(integer) -> iodata().
+-spec encode_run(integer) -> binary().
 encode_run(Length) when Length =< 62 ->
     %% -1 = no need to encode a run of length 0, so encoded 0 = length 1
     <<3:2, (Length-1):6>>.
@@ -227,7 +226,8 @@ decode(Channels, Chunks) ->
     %% modifiying the previous pixel, if we start with a pixel having
     %% the correct number of channels, then all pixel modifications
     %% create pixels with the correct number of channels.
-    case decode_loop(Chunks, state_initial(pixel_initial(Channels)), <<>>, 0) of
+    case decode_loop(Chunks, state_initial(pixel_initial(Channels)),
+                     <<>>, 0) of
         {ok, Pixels, _} ->
             {ok, Pixels};
         Error={error,_} ->
@@ -246,7 +246,7 @@ decode(Channels, Chunks) ->
 %% bits. This could be rewritten to take one byte at a time, and track
 %% decoding state until a full chunk is read, but the pattern matching
 %% works out well the way it's written here.
--spec decode_loop(binary(), #eqoi_state{}, iodata(), integer()) ->
+-spec decode_loop(binary(), #eqoi_state{}, binary(), integer()) ->
           {ok, binary(), #eqoi_state{}} | {error, proplists:proplist()}.
 decode_loop(<<>>, State, Acc, _) ->
     %% accept a chunk stream with no file tail, for easier testing
@@ -312,7 +312,9 @@ decode_loop(<<3:2, Length:6, Rest/binary>>,
             Acc, Offset) ->
     %% short run
     %% (see encode_run/1 for "+1" explanation)
-    decode_loop(Rest, State, <<Acc/binary, (binary:copy(Pixel, Length+1))/binary>>, Offset+1).
+    decode_loop(Rest, State,
+                <<Acc/binary, (binary:copy(Pixel, Length+1))/binary>>,
+                Offset+1).
 
 %% PIXEL VALUE MANIPULATION
 
@@ -424,7 +426,7 @@ qoif_header({Width, Height}, Channels) ->
 verify(Channels, Pixels) ->
     EncodeState = state_initial(pixel_initial(Channels)),
     DecodeState = EncodeState,
-    verify(Channels, EncodeState, DecodeState, Pixels, [], 0).
+    verify(Channels, EncodeState, DecodeState, Pixels, <<>>, 0).
 
 %% Consume Pixels (fourth argument) one at a time, passing them to the
 %% encoder, and accumulating them in Acc (fifth argument). When the
@@ -435,13 +437,13 @@ verify(Channels, Pixels) ->
 %% helpful information when the decoding doesn't match the original.
 -spec verify(channels(),
              #eqoi_state{}, #eqoi_state{},
-             binary(), iodata(),
+             binary(), binary(),
              integer()) ->
           {ok, #eqoi_state{}, #eqoi_state{}} |
           {error, proplists:proplist()}.
 verify(Channels, ES, DS, <<>>, Acc, Consumed) ->
     case Acc of
-        [] ->
+        <<>> ->
             case ES#eqoi_state.run of
                 0 ->
                     {ok, ES, DS};
@@ -457,15 +459,14 @@ verify(Channels, ES, DS, <<>>, Acc, Consumed) ->
             case ES#eqoi_state.run of
                 0 ->
                     {error, [{reason, "Accumulated pixels remaining"},
-                             {pixels_remaining, length(Acc)},
+                             {pixels_remaining, size(Acc)},
                              {pixels_consumed, Consumed},
                              {encoder_state, ES},
                              {decoder_state, DS}]};
                 N ->
                     Chunks = encode_run(N),
                     NewES = ES#eqoi_state{run=0},
-                    Expect = list_to_binary(lists:reverse(Acc)),
-                    case verify_match(Channels, Chunks, Expect, DS) of
+                    case verify_match(Channels, Chunks, Acc, DS) of
                         {ok, NewDS} ->
                             {ok, NewES, NewDS};
                         {error, Reason, NewDS} ->
@@ -479,14 +480,14 @@ verify(Channels, ES, DS, <<>>, Acc, Consumed) ->
 verify(Channels, ES, DS, Pixels, Acc, Consumed) ->
     <<Next:Channels/binary, Rest/binary>> = Pixels,
     case encode_pixel(Next, ES) of
-        {[], NewES} ->
-            verify(Channels, NewES, DS, Rest, [Next | Acc], Consumed + 1);
-        {EncodedList, NewES} ->
-            Chunks = list_to_binary([EncodedList]),
-            Expect = list_to_binary(lists:reverse([Next | Acc])),
+        {none, NewES} ->
+            verify(Channels, NewES, DS, Rest, <<Acc/binary, Next/binary>>,
+                   Consumed + 1);
+        {Chunks, NewES} ->
+            Expect = <<Acc/binary, Next/binary>>,
             case verify_match(Channels, Chunks, Expect, DS) of
                 {ok, NewDS} ->
-                    verify(Channels, NewES, NewDS, Rest, [], Consumed + 1);
+                    verify(Channels, NewES, NewDS, Rest, <<>>, Consumed + 1);
                 {error, Reason, NewDS} ->
                     {error, [{reason, Reason},
                              {chunks, Chunks},
@@ -505,7 +506,7 @@ verify(Channels, ES, DS, Pixels, Acc, Consumed) ->
 verify_match(Channels, Chunks, Expect, DS) ->
     case decode_loop(Chunks, DS, <<>>, 0) of
         {ok, PixelList, NewDS} ->
-            case match_pixels(Channels, Expect, iolist_to_binary(PixelList)) of
+            case match_pixels(Channels, Expect, PixelList) of
                 {ok, <<>>} ->
                     {ok, NewDS};
                 {ok, Remaining} ->
