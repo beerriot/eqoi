@@ -227,7 +227,7 @@ decode(Channels, Chunks) ->
     %% modifiying the previous pixel, if we start with a pixel having
     %% the correct number of channels, then all pixel modifications
     %% create pixels with the correct number of channels.
-    case decode_loop(Chunks, state_initial(pixel_initial(Channels)), [], 0) of
+    case decode_loop(Chunks, state_initial(pixel_initial(Channels)), <<>>, 0) of
         {ok, Pixels, _} ->
             {ok, Pixels};
         Error={error,_} ->
@@ -250,9 +250,9 @@ decode(Channels, Chunks) ->
           {ok, binary(), #eqoi_state{}} | {error, proplists:proplist()}.
 decode_loop(<<>>, State, Acc, _) ->
     %% accept a chunk stream with no file tail, for easier testing
-    {ok, iolist_to_binary(lists:reverse(Acc)), State};
+    {ok, Acc, State};
 decode_loop(?FILE_TAIL, State, Acc, _) ->
-    {ok, iolist_to_binary(lists:reverse(Acc)), State};
+    {ok, Acc, State};
 decode_loop(<<0:2, Hash:6, Rest/binary>>,
             State=#eqoi_state{index=Index},
             Acc, Offset) ->
@@ -260,13 +260,13 @@ decode_loop(<<0:2, Hash:6, Rest/binary>>,
     case Index of
         #{Hash := Pixel} ->
             decode_loop(Rest, State#eqoi_state{previous=Pixel},
-                        [Pixel|Acc], Offset+1);
+                        <<Acc/binary, Pixel/binary>>, Offset+1);
         _ ->
             {error, [{reason, {bad_pixel_index, Index}},
                      {decoder_state, State},
                      {chunk_bytes_processed, Offset},
                      {chunk_bytes_remaining, Rest},
-                     {decoded_pixels, iolist_to_binary(lists:reverse(Acc))}]}
+                     {decoded_pixels, Acc}]}
     end;
 decode_loop(<<1:2, Rd:2, Gd:2, Bd:2,Rest/binary>>,
             State=#eqoi_state{previous=Pixel, index=Index},
@@ -277,7 +277,7 @@ decode_loop(<<1:2, Rd:2, Gd:2, Bd:2,Rest/binary>>,
     decode_loop(Rest,
                 State#eqoi_state{previous=NewPixel,
                                  index=index_add(NewPixel, Index)},
-                [NewPixel, Acc], Offset+1);
+                <<Acc/binary, NewPixel/binary>>, Offset+1);
 decode_loop(<<2:2, Gd:6, Rd:4, Bd:4, Rest/binary>>,
             State=#eqoi_state{previous=Pixel, index=Index},
             Acc, Offset) ->
@@ -288,7 +288,7 @@ decode_loop(<<2:2, Gd:6, Rd:4, Bd:4, Rest/binary>>,
     decode_loop(Rest,
                 State#eqoi_state{previous=NewPixel,
                                  index=index_add(NewPixel, Index)},
-                [NewPixel|Acc], Offset+2);
+                <<Acc/binary, NewPixel/binary>>, Offset+2);
 decode_loop(<<254:8, RGB:3/binary, Rest/binary>>,
             State=#eqoi_state{previous=Pixel, index=Index},
             Acc, Offset) ->
@@ -299,20 +299,20 @@ decode_loop(<<254:8, RGB:3/binary, Rest/binary>>,
     decode_loop(Rest,
                 State#eqoi_state{previous=NewPixel,
                                  index=index_add(NewPixel, Index)},
-                [NewPixel|Acc], Offset+4);
+                <<Acc/binary, NewPixel/binary>>, Offset+4);
 decode_loop(<<255:8, NewPixel:4/binary, Rest/binary>>,
             State=#eqoi_state{index=Index},
             Acc, Offset) ->
     decode_loop(Rest,
                 State#eqoi_state{previous=NewPixel,
                                  index=index_add(NewPixel, Index)},
-                [NewPixel|Acc], Offset+5);
+                <<Acc/binary, NewPixel/binary>>, Offset+5);
 decode_loop(<<3:2, Length:6, Rest/binary>>,
             State=#eqoi_state{previous=Pixel},
             Acc, Offset) ->
     %% short run
     %% (see encode_run/1 for "+1" explanation)
-    decode_loop(Rest, State, [binary:copy(Pixel, Length+1)|Acc], Offset+1).
+    decode_loop(Rest, State, <<Acc/binary, (binary:copy(Pixel, Length+1))/binary>>, Offset+1).
 
 %% PIXEL VALUE MANIPULATION
 
@@ -503,7 +503,7 @@ verify(Channels, ES, DS, Pixels, Acc, Consumed) ->
 -spec verify_match(channels(), binary(), binary(), #eqoi_state{}) ->
           {ok, #eqoi_state{}} | {error, term(), #eqoi_state{}}.
 verify_match(Channels, Chunks, Expect, DS) ->
-    case decode_loop(Chunks, DS, [], 0) of
+    case decode_loop(Chunks, DS, <<>>, 0) of
         {ok, PixelList, NewDS} ->
             case match_pixels(Channels, Expect, iolist_to_binary(PixelList)) of
                 {ok, <<>>} ->
